@@ -1,0 +1,34 @@
+Language: Cpp
+BasedOnStyle: Chromium
+
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Headers in "".
+  - Regex:           '".+"'
+    Priority:        1
+  # Headers in <> from external libraries.
+  - Regex:           '<.+\/.+>'
+    Priority:        2
+  # System headers in <> without extension (i.e. C).
+  - Regex:           '<[^.\/]+\..+>'
+    Priority:        3
+  # System headers in <> without extension (i.e. C++).
+  - Regex:           '<[^.\/]+>'
+    Priority:        4
+
+AlignOperands: AlignAfterOperator
+BreakConstructorInitializers: BeforeComma
+ColumnLimit: 100
+FixNamespaceComments: true
+IndentPPDirectives: AfterHash
+MaxEmptyLinesToKeep: 1
+NamespaceIndentation: All
+PackConstructorInitializers: NextLineOnly
+PointerAlignment: Middle
+QualifierAlignment: Right
+RequiresClausePosition: OwnLine
+SeparateDefinitionBlocks: Leave
+ShortNamespaceLines: 0
+SortIncludes: CaseSensitive
+SpaceAroundPointerQualifiers: Both
+WrapNamespaceBodyWithEmptyLines: Always

@@ -159,37 +159,37 @@ namespace aoc25 {
     // Implicit conversion from basic_simd_string_t.
     constexpr basic_simd_string_view_t(basic_simd_string_t<CharT, Traits> const &) noexcept;
 
-    // Explicit conversion to std::string_view.
-    constexpr explicit operator basic_string_view_t() const noexcept;
-    constexpr basic_string_view_t as_view() const noexcept;
+    // Implicit conversion to std::string_view.
+    [[nodiscard]] constexpr operator basic_string_view_t() const noexcept;
+    [[nodiscard]] constexpr basic_string_view_t as_view() const noexcept;
 
     // Iterators
-    constexpr auto begin() const noexcept;
-    constexpr auto cbegin() const noexcept;
+    [[nodiscard]] constexpr auto begin() const noexcept;
+    [[nodiscard]] constexpr auto cbegin() const noexcept;
 
-    constexpr auto end() const noexcept;
-    constexpr auto cend() const noexcept;
+    [[nodiscard]] constexpr auto end() const noexcept;
+    [[nodiscard]] constexpr auto cend() const noexcept;
 
-    constexpr auto rbegin() const noexcept;
-    constexpr auto crbegin() const noexcept;
+    [[nodiscard]] constexpr auto rbegin() const noexcept;
+    [[nodiscard]] constexpr auto crbegin() const noexcept;
 
-    constexpr auto rend() const noexcept;
-    constexpr auto crend() const noexcept;
+    [[nodiscard]] constexpr auto rend() const noexcept;
+    [[nodiscard]] constexpr auto crend() const noexcept;
 
     // Element access
-    constexpr const_reference operator[](size_type idx) const noexcept;
-    constexpr const_reference at(size_type idx) const;
+    [[nodiscard]] constexpr const_reference operator[](size_type idx) const noexcept;
+    [[nodiscard]] constexpr const_reference at(size_type idx) const;
 
-    constexpr const_reference front() const;
-    constexpr const_reference back() const;
+    [[nodiscard]] constexpr const_reference front() const;
+    [[nodiscard]] constexpr const_reference back() const;
 
-    constexpr const_pointer data() const noexcept;
+    [[nodiscard]] constexpr const_pointer data() const noexcept;
 
     // Capacity
-    constexpr size_type size() const noexcept;
-    constexpr size_type length() const noexcept;
+    [[nodiscard]] constexpr size_type size() const noexcept;
+    [[nodiscard]] constexpr size_type length() const noexcept;
 
-    constexpr bool empty() const noexcept;
+    [[nodiscard]] constexpr bool empty() const noexcept;
 
     // Modifiers
     constexpr void remove_prefix(size_type n) noexcept;
@@ -200,35 +200,48 @@ namespace aoc25 {
     // Operations
     constexpr size_type copy(char * dest, size_type n, size_type pos = 0) const;
 
-    constexpr basic_simd_string_view_t substr(size_type pos = 0,
-                                              size_type n = basic_simd_string_view_t::npos) const;
+    [[nodiscard]] constexpr basic_simd_string_view_t substr(
+        size_type pos = 0,
+        size_type n = basic_simd_string_view_t::npos) const;
 
     // TODO: Implement search-related functions with SIMD acceleration.
-    constexpr bool starts_with(basic_simd_string_view_t sv) const noexcept;
-    constexpr bool starts_with(basic_string_view_t sv) const noexcept;
-    constexpr bool starts_with(char ch) const noexcept;
-    constexpr bool starts_with(char const * s) const noexcept;
+    [[nodiscard]] constexpr bool starts_with(basic_simd_string_view_t sv) const noexcept;
+    [[nodiscard]] constexpr bool starts_with(basic_string_view_t sv) const noexcept;
+    [[nodiscard]] constexpr bool starts_with(char ch) const noexcept;
+    [[nodiscard]] constexpr bool starts_with(char const * s) const noexcept;
 
-    constexpr bool ends_with(basic_simd_string_view_t sv) const noexcept;
-    constexpr bool ends_with(basic_string_view_t sv) const noexcept;
-    constexpr bool ends_with(char ch) const noexcept;
-    constexpr bool ends_with(char const * s) const noexcept;
+    [[nodiscard]] constexpr bool ends_with(basic_simd_string_view_t sv) const noexcept;
+    [[nodiscard]] constexpr bool ends_with(basic_string_view_t sv) const noexcept;
+    [[nodiscard]] constexpr bool ends_with(char ch) const noexcept;
+    [[nodiscard]] constexpr bool ends_with(char const * s) const noexcept;
 
-    constexpr size_type find(basic_simd_string_view_t v, size_type pos = 0) const noexcept;
-    constexpr size_type find(basic_string_view_t v, size_type pos = 0) const noexcept;
-    constexpr size_type find(CharT ch, size_type pos = 0) const noexcept;
-    constexpr size_type find(CharT const * s, size_type pos, size_type count) const;
-    constexpr size_type find(CharT const * s, size_type pos = 0) const;
+    [[nodiscard]] constexpr size_type find(basic_simd_string_view_t v,
+                                           size_type pos = 0) const noexcept;
+    [[nodiscard]] constexpr size_type find(basic_string_view_t v, size_type pos = 0) const noexcept;
+    [[nodiscard]] constexpr size_type find(CharT ch, size_type pos = 0) const noexcept;
+    [[nodiscard]] constexpr size_type find(CharT const * s, size_type pos, size_type count) const;
+    [[nodiscard]] constexpr size_type find(CharT const * s, size_type pos = 0) const;
 
-    constexpr size_type rfind(basic_simd_string_view_t v, size_type pos = npos) const noexcept;
-    constexpr size_type rfind(basic_string_view_t v, size_type pos = npos) const noexcept;
-    constexpr size_type rfind(CharT ch, size_type pos = npos) const noexcept;
-    constexpr size_type rfind(CharT const * s, size_type pos, size_type count) const;
-    constexpr size_type rfind(CharT const * s, size_type pos = npos) const;
+    [[nodiscard]] constexpr size_type rfind(basic_simd_string_view_t v,
+                                            size_type pos = npos) const noexcept;
+    [[nodiscard]] constexpr size_type rfind(basic_string_view_t v,
+                                            size_type pos = npos) const noexcept;
+    [[nodiscard]] constexpr size_type rfind(CharT ch, size_type pos = npos) const noexcept;
+    [[nodiscard]] constexpr size_type rfind(CharT const * s, size_type pos, size_type count) const;
+    [[nodiscard]] constexpr size_type rfind(CharT const * s, size_type pos = npos) const;
+
+    [[nodiscard]] constexpr size_type find_last_not_of(basic_string_view_t v,
+                                                       size_type pos = npos) const noexcept;
+    [[nodiscard]] constexpr size_type find_last_not_of(CharT ch,
+                                                       size_type pos = npos) const noexcept;
+    [[nodiscard]] constexpr size_type find_last_not_of(CharT const * s,
+                                                       size_type pos,
+                                                       size_type count) const;
+    [[nodiscard]] constexpr size_type find_last_not_of(CharT const * s, size_type pos = npos) const;
 
     // Non-member functions
-    friend auto operator<=>(basic_simd_string_view_t const & lhs,
-                            basic_simd_string_view_t const & rhs) noexcept = default;
+    [[nodiscard]] friend auto operator<=>(basic_simd_string_view_t const & lhs,
+                                          basic_simd_string_view_t const & rhs) noexcept = default;
 
    private:
     basic_string_view_t view_;

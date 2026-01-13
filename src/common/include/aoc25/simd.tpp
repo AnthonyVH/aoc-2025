@@ -380,4 +380,32 @@ namespace aoc25 {
     return view_.rfind(s, pos);
   }
 
+  template <class CharT, class Traits>
+  constexpr auto basic_simd_string_view_t<CharT, Traits>::find_last_not_of(
+      basic_string_view_t v,
+      size_type pos) const noexcept -> size_type {
+    return view_.find_last_not_of(v, pos);
+  }
+
+  template <class CharT, class Traits>
+  constexpr auto basic_simd_string_view_t<CharT, Traits>::find_last_not_of(CharT ch, size_type pos)
+      const noexcept -> size_type {
+    return view_.find_last_not_of(ch, pos);
+  }
+
+  template <class CharT, class Traits>
+  constexpr auto basic_simd_string_view_t<CharT, Traits>::find_last_not_of(CharT const * s,
+                                                                           size_type pos,
+                                                                           size_type count) const
+      -> size_type {
+    return view_.find_last_not_of(s, pos, count);
+  }
+
+  template <class CharT, class Traits>
+  constexpr auto basic_simd_string_view_t<CharT, Traits>::find_last_not_of(CharT const * s,
+                                                                           size_type pos) const
+      -> size_type {
+    return view_.find_last_not_of(s, pos);
+  }
+
 }  // namespace aoc25

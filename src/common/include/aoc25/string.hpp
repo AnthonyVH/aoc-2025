@@ -8,9 +8,12 @@ namespace aoc25 {
 
   namespace detail {
 
+    template <class T>
+    concept is_split_callback_return_type = std::same_as<T, void> || std::same_as<T, bool>;
+
     template <class CallbackFn>
     concept is_split_callback = requires(CallbackFn cb, simd_string_view_t sv) {
-      { cb(sv) } -> std::same_as<bool>;
+      { cb(sv) } -> is_split_callback_return_type;
     };
 
   }  // namespace detail
@@ -34,6 +37,13 @@ namespace aoc25 {
    * splitter, an empty substring is produced for the start. If the input ends with a splitter, no
    * substring is produced for the end. If there are characters remaining after the last splitter,
    * a final substring is produced for them.
+   *
+   * @arg callback A callable object that is invoked for each substring found. It must accept a
+   *     single argument of type `simd_string_view_t` and return either `void` or `bool`. If it
+   *     returns `bool` and the value is `false`, the splitting operation is stopped early.
+   *
+   * @return The remaining unprocessed portion of the input string after the last splitter. If the
+   *     entire input was processed, an empty string view is returned.
    */
   template <detail::is_split_callback CallbackFn>
   simd_string_view_t split(simd_string_view_t input, CallbackFn && callback, char splitter = '\n');

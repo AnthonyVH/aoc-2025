@@ -14,12 +14,12 @@ namespace aoc25 {
     return std::move(input_dir) / fmt::format("day_{:02d}-part_{}.txt", day, part);
   }
 
-  std::vector<std::filesystem::path> example_file_paths(std::filesystem::path const & dir,
-                                                        size_t day,
-                                                        size_t part) {
-    // Find all files matching the pattern "{prefix}-example_{number}.txt"
+  std::vector<std::filesystem::path> verify_file_paths(std::filesystem::path const & dir,
+                                                       size_t day,
+                                                       size_t part) {
+    // Find all files matching the pattern "{prefix}(?:-example_{number})?.txt"
     auto const pattern =
-        std::regex(fmt::format(R"(^day_{:02d}-part_{:d}-example_(\d+)\.txt$)", day, part));
+        std::regex(fmt::format(R"(^day_{:02d}-part_{:d}(?:-example_\d+)?\.txt$)", day, part));
 
     // Compiler error if entries is not a separate variable.
     auto entries = std::filesystem::directory_iterator(dir);
@@ -29,6 +29,14 @@ namespace aoc25 {
                    std::views::filter([&](auto const & e) {
                      auto const filename = e.path().filename().native();
                      return std::regex_match(filename, pattern);
+                   }) |
+                   std::views::filter([&](auto const & e) {
+                     // Check that solution file exists.
+                     auto const & path = e.path();
+                     auto const solution_file =
+                         path.parent_path() /
+                         path.stem().concat("-solution").concat(path.extension().native());
+                     return std::filesystem::exists(solution_file);
                    }) |
                    std::views::transform([](auto const & e) { return e.path(); });
 

@@ -18,10 +18,14 @@ namespace aoc25 {
   /// @brief Returns path to input file for given day and part.
   std::filesystem::path input_file_path(std::filesystem::path dir, size_t day, size_t part);
 
-  /// @brief Returns paths to all example files for given day and part.
-  std::vector<std::filesystem::path> example_file_paths(std::filesystem::path const & dir,
-                                                        size_t day,
-                                                        size_t part);
+  /** @brief Returns paths to all verification files (i.e. examples) for given day and part.
+   * @returns Vector of paths to files for which a matching solution file exists.
+   * @note If a "day_x-part_y-solution.txt" exists, then the day's "full" question will be
+   * used for verification as well.
+   */
+  std::vector<std::filesystem::path> verify_file_paths(std::filesystem::path const & dir,
+                                                       size_t day,
+                                                       size_t part);
 
   /// @brief Part tag for dispatching to solution part-specific implementations.
   template <size_t N>

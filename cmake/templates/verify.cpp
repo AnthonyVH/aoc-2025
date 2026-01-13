@@ -45,7 +45,7 @@ namespace {
   template <size_t Day, size_t Part, size_t Version, class StringLike>
   bool verify_day_part_version(std::string_view msg_prefix,
                                StringLike const & input,
-                               size_t example_number,
+                               std::optional<size_t> example_number,
                                std::string_view expected) {
     static constexpr bool run_version = Version != static_cast<size_t>(-1);
 
@@ -62,11 +62,13 @@ namespace {
     }();
     auto const actual_str = fmt::format("{}", actual);
 
-    spdlog::info("[{}{} - example {}] {} (actual: {}, expected: {})", msg_prefix,
-                 run_version ? fmt::format(" v{:d}", Version) : std::string_view{}, example_number,
-                 (actual_str == expected) ? fmt::styled("PASS", fmt::fg(fmt::terminal_color::green))
-                                          : fmt::styled("FAIL", fmt::fg(fmt::terminal_color::red)),
-                 actual_str, expected);
+    spdlog::info(
+        "[{}{}{}] {} (actual: {}, expected: {})", msg_prefix,
+        run_version ? fmt::format(" v{:d}", Version) : std::string_view{},
+        example_number ? fmt::format(" - example {}", *example_number) : std::string_view{},
+        (actual_str == expected) ? fmt::styled("PASS", fmt::fg(fmt::terminal_color::green))
+                                 : fmt::styled("FAIL", fmt::fg(fmt::terminal_color::red)),
+        actual_str, expected);
     return actual_str == expected;
   }
 
@@ -82,30 +84,34 @@ namespace {
     if constexpr (can_run) {
       auto const msg_prefix = fmt::format("day {:02} - part {}", Day, Part);
 
-      auto const example_files = example_file_paths(STRINGIFY(INPUT_DIR), Day, Part);
+      auto const verification_files = verify_file_paths(STRINGIFY(INPUT_DIR), Day, Part);
 
-      if (example_files.empty()) {
+      if (verification_files.empty()) {
         spdlog::warn("[{}] No example files found", msg_prefix);
         return test_count;
       }
 
       // Validate each example file for each version. Iterate over example files first, since
       // this makes it easier to compare the output of different versions against each other.
-      for (auto const & example_file : example_files) {
+      for (auto const & verification_file : verification_files) {
         auto const & solution_file =
-            example_file.parent_path() /
-            example_file.stem().concat("-solution").concat(example_file.extension().native());
-
-        if (!std::filesystem::exists(solution_file)) {  // Skip example if file doesn't exist.
-          spdlog::error("[{}] Solution file does not exist ({})", msg_prefix, solution_file);
-          continue;
-        }
+            verification_file.parent_path() / verification_file.stem()
+                                                  .concat("-solution")
+                                                  .concat(verification_file.extension().native());
+        assert(std::filesystem::exists(solution_file));
 
         auto const expected = trim(read_file(solution_file));
-        size_t const example_number = std::stoul(example_file.stem().native().substr(
-            example_file.stem().native().find_last_of('_') + 1));
+        auto const example_number = [&] -> std::optional<size_t> {
+          bool const is_example =
+              verification_file.stem().native().find("-example_") != std::string::npos;
+          if (!is_example) {
+            return std::nullopt;
+          }
+          return std::stoul(verification_file.stem().native().substr(
+              verification_file.stem().native().find_last_of('_') + 1));
+        }();
 
-        auto input = read_file(example_file);
+        auto input = read_file(verification_file);
 
         if constexpr (version_info.has_versions) {
           static constexpr auto versions =

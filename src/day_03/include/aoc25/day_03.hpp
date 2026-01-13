@@ -95,20 +95,9 @@ namespace aoc25 {
 
   template <>
   struct day_t<3> {
-    uint32_t solve(part_t<1>, version_t<0>, std::string_view input);
-    uint32_t solve(part_t<1>, version_t<1>, simd_string_t const & input);
-    uint32_t solve(part_t<1>, version_t<2>, std::string_view input);
-    uint32_t solve(part_t<1>, version_t<3>, std::string_view input);
+    uint32_t solve(part_t<1>, version_t<0>, simd_string_view_t input);
 
-    uint64_t solve(part_t<2>, version_t<0>, std::string_view input);
-    uint64_t solve(part_t<2>, version_t<1>, std::string_view input);
-    uint64_t solve(part_t<2>, version_t<2>, std::string_view input);
-    uint64_t solve(part_t<2>, version_t<3>, std::string_view input);
-    uint64_t solve(part_t<2>, version_t<4>, simd_string_t const & input);
-    uint64_t solve(part_t<2>, version_t<5>, simd_string_t const & input);
-    uint64_t solve(part_t<2>, version_t<6>, simd_string_t const & input);
-    uint64_t solve(part_t<2>, version_t<7>, simd_string_t const & input);
-    uint64_t solve(part_t<2>, version_t<8>, simd_string_t const & input);
+    uint64_t solve(part_t<2>, version_t<0>, simd_string_view_t input);
   };
 
 }  // namespace aoc25

@@ -41,7 +41,7 @@ namespace aoc25 {
     T value;
     [[maybe_unused]] auto const [_, ec] =
         std::from_chars(str.data(), str.data() + str.size(), value);
-    if (ec != std::errc{}) {
+    if (ec != std::errc{}) [[unlikely]] {
       throw std::invalid_argument(fmt::format("Failed to convert '{}' to integer", str));
     }
     return value;

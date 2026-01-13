@@ -18,7 +18,6 @@ target_include_directories(aoc25-common
 target_link_libraries(aoc25-common
   PUBLIC
     fmt::fmt
-    spdlog::spdlog
-  PRIVATE
     hwy
+    spdlog::spdlog
 )

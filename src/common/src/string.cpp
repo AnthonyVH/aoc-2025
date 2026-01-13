@@ -1,3 +1,4 @@
+
 #include "aoc25/string.hpp"
 
 #undef HWY_TARGET_INCLUDE
@@ -16,14 +17,13 @@ namespace aoc25 {
 
     namespace hn = hwy::HWY_NAMESPACE;
 
-    std::span<simd_aligned_span_t<char const>> split_lines(
-        simd_aligned_span_t<char const> input,
-        std::span<simd_aligned_span_t<char const>> output,
-        char splitter) {
+    std::span<simd_span_t<char const>> split_lines(simd_span_t<char const> input,
+                                                   std::span<simd_span_t<char const>> output,
+                                                   char splitter) {
       static constexpr hn::ScalableTag<uint8_t> tag{};
       static constexpr size_t lane_size = hn::Lanes(tag);
 
-      uint8_t const* HWY_RESTRICT data = reinterpret_cast<uint8_t const*>(input.data());
+      uint8_t const * HWY_RESTRICT data = reinterpret_cast<uint8_t const *>(input.data());
       auto const splitters = hn::Set(tag, splitter);
       size_t line_start = 0;
       size_t line_idx = 0;
@@ -42,8 +42,7 @@ namespace aoc25 {
           assert(line_start + line_length <= input.size());
           assert(line_idx < output.size());
 
-          output[line_idx++] = simd_aligned_span_t<char const>(
-              reinterpret_cast<char const*>(&data[line_start]), line_length);
+          output[line_idx++] = input.subspan(line_start, line_length);
           line_start += line_length + 1;  // +1 to skip the splitter.
         }
       }
@@ -51,14 +50,14 @@ namespace aoc25 {
       if (line_start < input.size()) {  // Handle last line if not ending with a splitter.
         size_t const line_length = input.size() - line_start;
         assert(line_idx < output.size());
-        output[line_idx++] = simd_aligned_span_t<char const>(
-            reinterpret_cast<char const*>(&data[line_start]), line_length);
+        output[line_idx++] = input.subspan(line_start, line_length);
       }
 
       return output.first(line_idx);
     }
 
   }  // namespace HWY_NAMESPACE
+
 }  // namespace aoc25
 
 HWY_AFTER_NAMESPACE();
@@ -66,11 +65,12 @@ HWY_AFTER_NAMESPACE();
 #ifdef HWY_ONCE
 
 namespace aoc25 {
+
   HWY_EXPORT(split_lines);
 
-  HWY_DLLEXPORT std::span<simd_aligned_span_t<char const>> split_lines(
-      simd_aligned_span_t<char const> input,
-      std::span<simd_aligned_span_t<char const>> output,
+  HWY_DLLEXPORT std::span<simd_span_t<char const>> split_lines(
+      simd_span_t<char const> input,
+      std::span<simd_span_t<char const>> output,
       char splitter) {
     return HWY_DYNAMIC_DISPATCH(split_lines)(input, output, splitter);
   }

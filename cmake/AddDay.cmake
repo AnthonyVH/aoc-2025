@@ -77,6 +77,65 @@ function (add_day_benchmark EXE_SUFFIX DAY_NUMBERS)
     PRIVATE
       benchmark::benchmark
   )
+
+  # We want to maximally optimize in benchmark builds. So we want to do profile-guided optimization.
+  set(ENABLE_PGO TRUE)
+  if(ENABLE_PGO)
+    # First define a target to generates a runtime profile.
+    add_day_exe_from_template(${EXE_SUFFIX}-pgo_gen "benchmark.cpp" "${DAY_NUMBERS}" PGO_GEN_TARGET)
+
+    target_link_libraries(${PGO_GEN_TARGET}
+      PRIVATE
+        benchmark::benchmark
+    )
+
+    set(PGO_DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/${PGO_GEN_TARGET}-pgo_data")
+    set(PGO_TIMESTAMP_FILE "${CMAKE_CURRENT_BINARY_DIR}/${PGO_GEN_TARGET}-pgo_data.stamp")
+
+    target_compile_options(${PGO_GEN_TARGET}
+      PRIVATE
+        "-fprofile-generate=${PGO_DATA_DIR}"
+    )
+    target_link_options(${PGO_GEN_TARGET}
+      PRIVATE
+        "-fprofile-generate=${PGO_DATA_DIR}"
+    )
+
+    # Next, create a custom command to run this executable from the main source dir.
+    GetRenameFilesPath(RENAME_FILES_SCRIPT_PATH)
+
+    add_custom_command(
+      OUTPUT ${PGO_TIMESTAMP_FILE}
+      COMMAND $<TARGET_FILE:${PGO_GEN_TARGET}> --benchmark_min_time=1s
+      COMMAND ${CMAKE_COMMAND}
+          -DFILE_DIR=${PGO_DATA_DIR}
+          -DNEEDLE=${PGO_GEN_TARGET}
+          -DREPLACEMENT=${TARGET}
+          -P ${RENAME_FILES_SCRIPT_PATH}
+      COMMAND ${CMAKE_COMMAND} -E touch ${PGO_TIMESTAMP_FILE}
+      WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+      DEPENDS ${PGO_GEN_TARGET}
+      COMMENT "Running instrumented binary ${PGO_GEN_TARGET} to generate profile data..."
+      VERBATIM
+    )
+    add_custom_target(${PGO_GEN_TARGET}-gen_pgo_data DEPENDS "${PGO_TIMESTAMP_FILE}")
+
+    add_dependencies(${TARGET} ${PGO_GEN_TARGET}-gen_pgo_data)
+    target_compile_options(${TARGET}
+      PRIVATE
+        "-fprofile-use=${PGO_DATA_DIR}"
+        "-fprofile-correction"
+        "-fprofile-partial-training"
+        "-Wno-missing-profile"
+    )
+    target_link_options(${TARGET}
+      PRIVATE
+        "-fprofile-use=${PGO_DATA_DIR}"
+        "-fprofile-correction"
+        "-fprofile-partial-training"
+        "-Wno-missing-profile"
+    )
+  endif()
 endfunction()
 
 function (add_day_verify EXE_SUFFIX DAY_NUMBERS)

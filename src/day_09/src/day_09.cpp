@@ -16,6 +16,7 @@
 #include <optional>
 #include <ranges>
 #include <type_traits>
+#include <utility>
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "src/day_09.cpp"
@@ -97,42 +98,21 @@ namespace aoc25 {
              (std::abs(static_cast<int64_t>(a.y) - b.y) + 1);
     }
 
-  }  // namespace
+    using edge_vector_t = std::vector<std::array<uint32_t, 2>>;
 
-  uint64_t day_t<9>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+    struct edges_per_coord_t {
+      uint32_t coord;
+      edge_vector_t edges;
+    };
 
-    int64_t max_area = 0;
-    size_t num_points = points.size();
-
-    for (size_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
-      auto const & point_a = points.at(idx_a);
-
-      for (size_t idx_b = idx_a + 1; idx_b < num_points; ++idx_b) {
-        auto const & point_b = points.at(idx_b);
-        int64_t const area = calc_area(point_a, point_b);
-        SPDLOG_DEBUG("Area between {} and {}: {}", point_a, point_b, area);
-        max_area = std::max(max_area, area);
-      }
+    [[maybe_unused]] std::string format_as(edges_per_coord_t const & obj) {
+      return fmt::format("<coord: {}, edges: {}>", obj.coord, obj.edges);
     }
 
-    return max_area;
-  }
+    std::vector<edges_per_coord_t> build_vertical_edges(std::vector<point_t> const & points) {
+      std::vector<edges_per_coord_t> result;
+      std::unordered_map<uint32_t, uint16_t> coord_to_idx;
 
-  /* TODO: The proper way for part 1 in O(N log N):
-   * - Figure out direction of polygon (clockwise / counter-clockwise).
-   * - Calculate convex hull (using e.g. Andrew's monotone chain algorithm).
-   * - Use SMAWK to find the largest rectangle formed by any two points on the hull.
-   */
-
-  uint64_t day_t<9>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
-    std::vector<point_t> points = parse_input(input);
-
-    // Create map of vertical/horizontal edges for each x/y-coordinate.
-    std::map<uint32_t, std::vector<std::array<uint32_t, 2>>> vertical_edges;
-    std::map<uint32_t, std::vector<std::array<uint32_t, 2>>> horizontal_edges;
-
-    {
       point_t prev_point = points.back();
 
       auto const to_array = [](uint32_t lhs, uint32_t rhs) -> std::array<uint32_t, 2> {
@@ -140,27 +120,43 @@ namespace aoc25 {
         return {a, b};
       };
 
+      auto const get_edges_vector = [&](uint32_t coord) -> edge_vector_t & {
+        auto const [it, inserted] =
+            coord_to_idx.try_emplace(coord, static_cast<uint16_t>(coord_to_idx.size()));
+        if (inserted) {
+          result.emplace_back(edges_per_coord_t{
+              .coord = coord,
+              .edges = {},
+          });
+        }
+        return result.at(it->second).edges;
+      };
+
       for (auto const & point : points) {
-        if (prev_point.x == point.x) {
-          vertical_edges[point.x].emplace_back(to_array(prev_point.y, point.y));
+        if (prev_point.x == point.x) {  // Vertical edge.
+          auto & edges = get_edges_vector(point.x);
+          edges.emplace_back(to_array(prev_point.y, point.y));
         } else {
-          horizontal_edges[point.y].emplace_back(to_array(prev_point.x, point.x));
+          // No need to store horizontal edges.
         }
 
         prev_point = point;
       }
+
+      // Sort by coordinate.
+      std::ranges::sort(result, {}, &edges_per_coord_t::coord);
+
+      return result;
     }
 
-    SPDLOG_DEBUG("Vertical edges: {}", vertical_edges);
-    SPDLOG_DEBUG("Horizontal edges: {}", horizontal_edges);
+    using range_vector_t = std::vector<std::array<uint32_t, 2>>;
 
     // Create active horizontal and vertical ranges. These are basically between two coordinates,
     // i.e. if there's vertical edges at x = 1 and x = 3, then the first "active" vertical range is
     // between x = [1, 3).
-    auto const merge_ranges = [] [[nodiscard]] (
-                                  std::span<std::array<uint32_t, 2> const> active_range,
-                                  std::span<std::array<uint32_t, 2> const> new_edges) {
-      std::vector<std::array<uint32_t, 2>> result;
+    [[nodiscard]] range_vector_t merge_ranges(std::span<std::array<uint32_t, 2> const> active_range,
+                                              std::span<std::array<uint32_t, 2> const> new_edges) {
+      range_vector_t result;
 
       /* Assuming ranges are sorted. Pointing to a range in the active range and one in the new
        * edges one, loop the following:
@@ -231,89 +227,381 @@ namespace aoc25 {
       }
 
       return result;
+    }
+
+    struct ranges_per_coord_t {
+      uint32_t coord;
+      range_vector_t ranges;
     };
 
-    auto const edges_to_ranges =
-        [&](std::map<uint32_t, std::vector<std::array<uint32_t, 2>>> const & edge_map) {
-          static constexpr auto empty_range = std::vector<std::array<uint32_t, 2>>{};
-          std::map<uint32_t, std::vector<std::array<uint32_t, 2>>> result;
+    [[maybe_unused]] std::string format_as(ranges_per_coord_t const & obj) {
+      return fmt::format("<coord: {}, edges: {}>", obj.coord, obj.ranges);
+    }
 
-          auto const * prev_range = &empty_range;
-          for (auto const & [x, edges] : edge_map) {
-            auto const [it, _] = result.emplace(x, merge_ranges(*prev_range, edges));
-            prev_range = &(it->second);
-          }
-
-          assert(!result.empty());
-          assert(prev_range->empty());
-
-          return result;
-        };
-
-    auto const vertical_ranges = edges_to_ranges(vertical_edges);
-    auto const horizontal_ranges = edges_to_ranges(horizontal_edges);
-
-    SPDLOG_DEBUG("Vertical ranges: {}", vertical_ranges);
-    SPDLOG_DEBUG("Horizontal ranges: {}", horizontal_ranges);
-
-    /* Find maximum area rectangle the dumb way:
-     *
-     *   - Iterate over all possible pairs.
-     *   - For each pair, construct 4 edges.
-     *   - Check whether edges fall completely inside an active range.
-     *   - If yes, update maximum area.
+    /** Convert a range of edges into a range of active ranges at each coordinate. A range is
+     * "active" if it lies inside the polygon.
      */
-    auto const in_range =
-        [&](std::map<uint32_t, std::vector<std::array<uint32_t, 2>>> const & range_map,
-            uint32_t key, bool key_is_min_not_max, std::span<uint32_t const, 2> range) -> bool {
-      // If key is first one in range, use entry at that key. Otherwise, use entry for previous key.
-      auto key_it = range_map.find(key);
-      assert(key_it != range_map.end());
-      std::advance(key_it, key_is_min_not_max ? 0 : -1);
-      auto const & ranges = key_it->second;
-      SPDLOG_DEBUG("  Using ranges at key {}: {}", key_it->first, ranges);
+    std::vector<ranges_per_coord_t> edges_to_ranges(
+        std::vector<edges_per_coord_t> const & edges_per_coord) {
+      static constexpr auto empty_range = range_vector_t{};
 
-      // First range for which end > range.begin.
-      auto const begin_it =
-          std::ranges::upper_bound(ranges, range[0], {}, [](auto const & e) { return e[1]; });
-      bool const begin_in_range = (begin_it != ranges.end()) && (begin_it->at(0) <= range[0]);
+      std::vector<ranges_per_coord_t> result;
+      result.reserve(edges_per_coord.size());
 
-      // First range for which end >= range.end.
-      auto const end_it = std::ranges::lower_bound(begin_it, ranges.end(), range[1], {},
-                                                   [](auto const & e) { return e[1]; });
+      auto const * prev_range = &empty_range;
+      for (auto const & edges : edges_per_coord) {
+        auto const & edge_list = edges.edges;
+        auto const & new_elem = result.emplace_back(ranges_per_coord_t{
+            .coord = edges.coord,
+            .ranges = merge_ranges(*prev_range, edge_list),
+        });
+        prev_range = &new_elem.ranges;
+      }
 
-      bool const is_in_range = begin_in_range && (begin_it == end_it);
-      SPDLOG_DEBUG("  <{}, {}> is in range: {}", key, range, is_in_range);
-      return is_in_range;
+      // Last range should be empty, because it's at the end of the polygon.
+      assert(!result.empty());
+      assert(prev_range->empty());
+
+      return result;
+    }
+
+    struct active_range_t {
+      std::array<uint32_t, 2> range;
+      std::vector<uint32_t> coords;
     };
 
-    uint64_t max_area = 0;
+    [[maybe_unused]] std::string format_as(active_range_t const & obj) {
+      return fmt::format("<range: {}, coords: {}>", obj.range, obj.coords);
+    }
 
-    for (size_t idx_a = 0; idx_a < points.size(); ++idx_a) {
+    bool contains(std::span<uint32_t const, 2> range, uint32_t coord) noexcept {
+      return (coord >= range[0]) && (coord <= range[1]);
+    }
+
+    std::vector<active_range_t> build_active_ranges(
+        std::vector<std::array<uint32_t, 2>> const & ranges,
+        std::vector<uint32_t> const & coords) {
+      SPDLOG_DEBUG("Building active ranges from ranges: {} and coords: {}", ranges, coords);
+      std::vector<active_range_t> result;
+      result.reserve(ranges.size());
+
+      size_t coord_idx = 0;
+      size_t range_idx = 0;
+      active_range_t * active_range = nullptr;
+
+      // We want to end up with a list of active ranges and the coordinates in them. If there's no
+      // coordinates in range, then we shouldn't store that range. Both coord and ranges are sorted.
+      // So iterate in lockstep over both, and add to the result while they're both in range.
+      while ((coord_idx < coords.size()) && (range_idx < ranges.size())) {
+        auto const coord = coords.at(coord_idx);
+
+        if (active_range) {
+          /* There's two options:
+           *   - coord is in active range: add it, and advance
+           *   - coord is after active range: close active range
+           *
+           * Due to the sorted inputs, the third option (coord before active range) is not possible.
+           */
+          if (contains(active_range->range, coord)) {
+            active_range->coords.push_back(coord);
+            ++coord_idx;
+          } else {
+            assert(coord > active_range->range[1]);
+            ++range_idx;
+            active_range = nullptr;
+          }
+        } else {
+          /* Here there's three options:
+           *   - coord is in range: create new active range, add coord, advance coord
+           *   - coord is before range: advance coord, i.e. discard the current coord
+           *   - coord is after range: advance range, i.e. discard the current range
+           */
+          if (contains(ranges.at(range_idx), coord)) {
+            active_range = std::addressof(result.emplace_back(active_range_t{
+                .range = ranges.at(range_idx),
+                .coords = {coord},
+            }));
+            ++coord_idx;
+          } else if (coord < ranges.at(range_idx)[0]) {
+            ++coord_idx;
+          } else if (coord > ranges.at(range_idx)[1]) {
+            ++range_idx;
+          }
+        }
+      }
+
+      return result;
+    }
+
+    void update_active_ranges(std::vector<active_range_t> & active_ranges,
+                              std::vector<std::array<uint32_t, 2>> const & new_ranges) {
+      SPDLOG_TRACE("    Updating active ranges {::s} with ranges: {}", active_ranges, new_ranges);
+
+      size_t active_idx = 0;
+      size_t new_idx = 0;
+
+      // New ranges can only make the active range smaller, never larger.
+      while ((active_idx < active_ranges.size()) && (new_idx < new_ranges.size())) {
+        auto & active_range = active_ranges.at(active_idx);
+        auto const & new_range = new_ranges.at(new_idx);
+
+        bool const start_before_range = new_range[0] < active_range.range[0];
+        bool const end_before_range = new_range[1] <= active_range.range[0];
+
+        bool const start_after_range = new_range[0] >= active_range.range[1];
+        bool const end_after_range = new_range[1] > active_range.range[1];
+
+        SPDLOG_TRACE(
+            "    Comparing active range {} (# {}) with new range {} (# {}): "
+            "start_before_range={}, "
+            "end_before_range={}, start_after_range={}, end_after_range={}",
+            active_range, active_idx, new_range, new_idx, start_before_range, end_before_range,
+            start_after_range, end_after_range);
+
+        if (end_before_range) {
+          assert(start_before_range);
+          ++new_idx;  // New range is completely before range, skip it.
+        } else if (start_after_range) {
+          assert(end_after_range);
+
+          // New range is completely after range, to nothing can overlap active range anymore.
+          // Hence, it should be deleted.
+          active_range.coords.clear();
+          ++active_idx;
+        } else if (start_before_range & end_after_range) {
+          // New range completely covers range, keep it.
+          ++active_idx;
+        } else {
+          // (Part of) new range overlaps with active range, reduce or split from active range.
+          bool const start_inside_range = !start_before_range && !start_after_range;
+          bool const end_inside_range = !end_before_range && !end_after_range;
+
+          if (start_inside_range && !end_inside_range) {
+            assert(!end_before_range && end_after_range);
+            active_range.range[0] = new_range[0];  // Begin active range at start of new range.
+
+            // Remove coords < begin of resized range.
+            auto & coords = active_range.coords;
+            size_t coord_idx = 0;
+
+            while ((coord_idx < coords.size()) && (coords.at(coord_idx) < active_range.range[0])) {
+              ++coord_idx;
+            }
+
+            std::ranges::rotate(coords, coords.begin() + coord_idx);
+            coords.resize(coords.size() - coord_idx);
+
+            // New range could overlap more active ranges, so check next active range.
+            ++active_idx;
+          } else if (end_inside_range) {
+            assert((start_before_range || start_inside_range) && !start_after_range);
+
+            // Split active range at end of new range. The upper range starts after the new range.
+            auto const insert_it = active_ranges.begin() + active_idx + 1;
+            auto upper_range_it = active_ranges.insert(
+                insert_it, active_range_t{
+                               .range = {new_range[1] + 1, active_range.range[1]},
+                               .coords = {},
+                           });
+
+            // Lower range begins either at the old beign, or at the new range begin.
+            auto lower_range_it = std::prev(upper_range_it);
+            lower_range_it->range[0] = start_inside_range ? new_range[0] : lower_range_it->range[0];
+            lower_range_it->range[1] = new_range[1];
+
+            // Move upper coords to new range.
+            auto & lower_coords = lower_range_it->coords;
+            auto & upper_coords = upper_range_it->coords;
+
+            size_t coord_idx = 0;
+
+            // Skip all coordinates that come before lower range.
+            while ((coord_idx < lower_coords.size()) &&
+                   (lower_coords.at(coord_idx) < lower_range_it->range[0])) {
+              ++coord_idx;
+            }
+
+            size_t const lower_coord_idx_start = coord_idx;
+
+            // Skip past all coordinates inside lower range.
+            while ((coord_idx < lower_coords.size()) &&
+                   (lower_coords.at(coord_idx) <= lower_range_it->range[1])) {
+              ++coord_idx;
+            }
+
+            size_t const lower_coord_idx_end = coord_idx;
+
+            // Skip all coordinates to come between lower and upper range.
+            while ((coord_idx < lower_coords.size()) &&
+                   (lower_coords.at(coord_idx) < upper_range_it->range[0])) {
+              ++coord_idx;
+            }
+
+            // Add all matching coordinates inside upper range.
+            while ((coord_idx < lower_coords.size()) &&
+                   (lower_coords.at(coord_idx) <= upper_range_it->range[1])) {
+              upper_coords.push_back(lower_coords.at(coord_idx));
+              ++coord_idx;
+            }
+
+            // Remove moved coordinates from lower range.
+            std::ranges::rotate(lower_coords, lower_coords.begin() + lower_coord_idx_start);
+            lower_coords.resize(lower_coord_idx_end - lower_coord_idx_start);
+
+            // Apply next merges to upper range. New range finished inside current one, so check
+            // next new range.
+            ++active_idx;
+            ++new_idx;
+          } else {
+            assert(false && "Unhandled case in active range update.");
+            std::unreachable();
+          }
+        }
+      }
+
+      // Mark remaining active ranges as empty.
+      for (; active_idx < active_ranges.size(); ++active_idx) {
+        auto & active_range = active_ranges.at(active_idx);
+        active_range.coords.clear();
+      }
+
+      // Remove all empty active ranges.
+      auto const [new_end_it, prev_end_it] = std::ranges::remove_if(
+          active_ranges, [](auto const & active_range) { return active_range.coords.empty(); });
+      active_ranges.erase(new_end_it, prev_end_it);
+
+      SPDLOG_TRACE("    Updated active ranges: {::s}", active_ranges);
+
+      assert(std::ranges::none_of(active_ranges, [](auto const & active_range) {
+        return active_range.range[0] == active_range.range[1];
+      }));
+    }
+
+  }  // namespace
+
+  uint64_t day_t<9>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
+    std::vector<point_t> const points = parse_input(input);
+
+    int64_t max_area = 0;
+    size_t num_points = points.size();
+
+    for (size_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
       auto const & point_a = points.at(idx_a);
 
-      for (size_t idx_b = idx_a + 1; idx_b < points.size(); ++idx_b) {
+      for (size_t idx_b = idx_a + 1; idx_b < num_points; ++idx_b) {
         auto const & point_b = points.at(idx_b);
-        SPDLOG_DEBUG("Rectangle between {} and {}", point_a, point_b);
+        int64_t const area = calc_area(point_a, point_b);
+        SPDLOG_DEBUG("Area between {} and {}: {}", point_a, point_b, area);
+        max_area = std::max(max_area, area);
+      }
+    }
 
-        auto const [x_min, x_max] =
-            std::minmax({static_cast<uint32_t>(point_a.x), static_cast<uint32_t>(point_b.x)});
-        auto const [y_min, y_max] =
-            std::minmax({static_cast<uint32_t>(point_a.y), static_cast<uint32_t>(point_b.y)});
+    return max_area;
+  }
 
-        // Check all rectangle edges
-        bool const in_polygon =
-            in_range(horizontal_ranges, y_min, true, std::array{x_min, x_max}) &&
-            ((y_min == y_max) ||
-             in_range(horizontal_ranges, y_max, false, std::array{x_min, x_max})) &&
-            in_range(vertical_ranges, x_min, true, std::array{y_min, y_max}) &&
-            ((x_min == x_max) || in_range(vertical_ranges, x_max, false, std::array{y_min, y_max}));
+  /* TODO: The proper way for part 1 in O(N log N):
+   * - Figure out direction of polygon (clockwise / counter-clockwise).
+   * - Calculate convex hull (using e.g. Andrew's monotone chain algorithm).
+   * - Use SMAWK to find the largest rectangle formed by any two points on the hull.
+   */
 
-        if (in_polygon) {
-          auto const area = calc_area(point_a, point_b);
-          SPDLOG_DEBUG("  area: {}, max area: {}", area, max_area);
-          max_area = std::max(max_area, area);
+  uint64_t day_t<9>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
+    std::vector<point_t> points = parse_input(input);
+
+    // Create list of vertical edges for each x-coordinate.
+    auto const vertical_edges = build_vertical_edges(points);
+    SPDLOG_DEBUG("Vertical edges: {}", vertical_edges);
+
+    auto const vertical_ranges = edges_to_ranges(vertical_edges);
+    SPDLOG_DEBUG("Vertical ranges: {}", vertical_ranges);
+
+    /* For each x-coordinate i:
+     *
+     *   - Create active vertical ranges, there are already known.
+     *   - Loop over all x-coordinates j, j >= i, while there are active ranges.
+     *     - For each active range, for each extremal y coordinate in that range, calculate area
+     *       with extremal y coordinates from x_j that fall within that range. Store maximum area.
+     *     - Update active vertical ranges using activate ranges at x_j.
+     *     - Remove any of x_i's y coordinates that are not within active ranges anymore. If an
+     *       active range is empty, remove it.
+     */
+    uint64_t max_area = 0;
+
+    for (size_t idx_a = 0; idx_a < vertical_edges.size() - 1; ++idx_a) {
+      auto const & edges_a = vertical_edges.at(idx_a);
+      auto const & ranges_a = vertical_ranges.at(idx_a).ranges;
+      auto const x_a = edges_a.coord;
+
+      auto active_ranges = build_active_ranges(
+          ranges_a, edges_a.edges | std::views::join | std::ranges::to<std::vector>());
+      SPDLOG_DEBUG("Starting at x = {} with active ranges: {::s}", x_a, active_ranges);
+
+      for (size_t idx_b = idx_a + 1; !active_ranges.empty() && (idx_b < vertical_edges.size());
+           ++idx_b) {
+        auto const & edges_b = vertical_edges.at(idx_b);
+        auto const x_b = edges_b.coord;
+        auto const x_length = x_b - x_a + 1;
+        auto const & new_edges = edges_b.edges;
+
+        SPDLOG_DEBUG("  Checking edges at x = {}: {}", x_b, new_edges);
+
+        size_t active_range_idx = 0;
+
+        auto const is_in_range = [&](uint32_t coord) {
+          if (active_range_idx >= active_ranges.size()) {
+            return false;
+          }
+
+          auto const & active_range = active_ranges.at(active_range_idx);
+          return (coord >= active_range.range[0]) && (coord <= active_range.range[1]);
+        };
+
+        auto const max_y_diff = [&](uint32_t coord) {
+          auto const & active_range = active_ranges.at(active_range_idx);
+          return std::max(std::abs(static_cast<int64_t>(active_range.coords.front()) - coord),
+                          std::abs(static_cast<int64_t>(active_range.coords.back()) - coord));
+        };
+
+        for (size_t edges_idx = 0;
+             (active_range_idx < active_ranges.size()) && (edges_idx < new_edges.size());
+             ++edges_idx) {
+          auto const & edge = new_edges.at(edges_idx);
+
+          // Find active range which this edge start lies in.
+          auto const is_above_range_end = [&](uint32_t coord) {
+            auto const & active_range = active_ranges.at(active_range_idx);
+            return coord > active_range.range[1];
+          };
+
+          while ((active_range_idx < active_ranges.size()) && is_above_range_end(edge[0])) {
+            ++active_range_idx;
+          }
+
+          if (is_in_range(edge[0])) {  // Calculate maximum area with this edge's begin.
+            auto const max_area_with_begin = x_length * (max_y_diff(edge[0]) + 1);
+            max_area = std::max<uint64_t>(max_area, max_area_with_begin);
+          }
+
+          // Next find active range which this edge end lies in.
+          auto const is_below_range_begin = [&](uint32_t coord) {
+            auto const & active_range = active_ranges.at(active_range_idx);
+            return coord < active_range.range[0];
+          };
+
+          while ((active_range_idx < active_ranges.size()) && is_below_range_begin(edge[1])) {
+            ++active_range_idx;
+          }
+
+          if (is_in_range(edge[1])) {  // Calculate maximum area with this edge's end.
+            auto const max_area_with_end = x_length * (max_y_diff(edge[1]) + 1);
+            max_area = std::max<uint64_t>(max_area, max_area_with_end);
+          }
         }
+
+        // Update the active ranges.
+        auto const & ranges_b = vertical_ranges.at(idx_b).ranges;
+        update_active_ranges(active_ranges, ranges_b);
+        SPDLOG_TRACE("    After x = {}, active ranges: {::s}", x_b, active_ranges);
       }
     }
 

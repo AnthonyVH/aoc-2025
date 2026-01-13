@@ -75,6 +75,12 @@ namespace aoc25 {
                (!std::is_rvalue_reference_v<Rng>)
     explicit(extent != std::dynamic_extent) constexpr simd_span_t(Rng && rng);
 
+    // Allow implicit conversion from simd_span_t<T> to simd_span_t<T const>.
+    template <class U>
+      requires std::is_const_v<T> && (!std::is_const_v<U>) &&
+               std::is_same_v<std::remove_cv_t<T>, std::remove_cv_t<U>>
+    constexpr simd_span_t(simd_span_t<U, Extent> const & other) noexcept;
+
     // Explicit conversions to std::span<T, Extent>.
     explicit operator span_t() const noexcept;
     span_t as_span() const noexcept;
@@ -134,6 +140,22 @@ namespace aoc25 {
     constexpr explicit simd_span_t(span_t span) noexcept;
   };
 
+  // Deduction guides for simd_span_t.
+  template <class It, class EndOrSize>
+  simd_span_t(It, EndOrSize) -> simd_span_t<std::remove_reference_t<std::iter_reference_t<It>>>;
+
+  template <class T, std::size_t N>
+  simd_span_t(T (&)[N]) -> simd_span_t<T, N>;
+
+  template <class T, std::size_t N>
+  simd_span_t(std::array<T, N> &) -> simd_span_t<T, N>;
+
+  template <class T, std::size_t N>
+  simd_span_t(std::array<T, N> const &) -> simd_span_t<T const, N>;
+
+  template <class Rng>
+  simd_span_t(Rng &&) -> simd_span_t<std::remove_reference_t<std::ranges::range_reference_t<Rng>>>;
+
   template <class CharT, class Traits = std::char_traits<CharT>>
   struct basic_simd_string_view_t {
    public:
@@ -152,6 +174,8 @@ namespace aoc25 {
     using size_type = typename basic_string_view_t::size_type;
     using difference_type = typename basic_string_view_t::difference_type;
 
+    using allocator_type = typename basic_simd_string_t<CharT, Traits>::allocator_type;
+
     static constexpr size_type npos = basic_string_view_t::npos;
 
     constexpr basic_simd_string_view_t() noexcept = default;
@@ -162,6 +186,8 @@ namespace aoc25 {
     // Implicit conversion to std::string_view.
     [[nodiscard]] constexpr operator basic_string_view_t() const noexcept;
     [[nodiscard]] constexpr basic_string_view_t as_view() const noexcept;
+
+    [[nodiscard]] constexpr simd_span_t<CharT const> as_span() const noexcept;
 
     // Iterators
     [[nodiscard]] constexpr auto begin() const noexcept;
@@ -251,6 +277,10 @@ namespace aoc25 {
 
   using simd_string_view_t = basic_simd_string_view_t<char>;
 
+  template <std::integral T>
+  uint64_t count(simd_span_t<T const> span, T const & value);
+
 }  // namespace aoc25
 
+#include "aoc25/simd-hwy.hpp"
 #include "aoc25/simd.tpp"

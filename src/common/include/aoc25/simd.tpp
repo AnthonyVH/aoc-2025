@@ -7,10 +7,19 @@ namespace aoc25 {
   template <class T, size_t Extent>
   template <class Rng>
     requires detail::aligned_range<Rng, simd_alignment_bytes> && (!std::is_rvalue_reference_v<Rng>)
-  constexpr simd_span_t<T, Extent>::simd_span_t(Rng && rng) : span_(rng) {}
+  constexpr simd_span_t<T, Extent>::simd_span_t(Rng && rng)
+      : span_(rng) {}
 
   template <class T, size_t Extent>
-  constexpr simd_span_t<T, Extent>::simd_span_t(span_t span) noexcept : span_(span) {}
+  template <class U>
+    requires std::is_const_v<T> && (!std::is_const_v<U>) &&
+             std::is_same_v<std::remove_cv_t<T>, std::remove_cv_t<U>>
+  constexpr simd_span_t<T, Extent>::simd_span_t(simd_span_t<U, Extent> const & other) noexcept
+      : span_(other.span_) {}
+
+  template <class T, size_t Extent>
+  constexpr simd_span_t<T, Extent>::simd_span_t(span_t span) noexcept
+      : span_(span) {}
 
   template <class T, size_t Extent>
   simd_span_t<T, Extent>::operator span_t() const noexcept {
@@ -153,6 +162,12 @@ namespace aoc25 {
   constexpr auto basic_simd_string_view_t<CharT, Traits>::as_view() const noexcept
       -> basic_string_view_t {
     return view_;
+  }
+
+  template <class CharT, class Traits>
+  constexpr simd_span_t<CharT const> basic_simd_string_view_t<CharT, Traits>::as_span()
+      const noexcept {
+    return *this;
   }
 
   template <class CharT, class Traits>

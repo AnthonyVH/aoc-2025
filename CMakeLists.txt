@@ -118,6 +118,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fmt)
 
+FetchContent_Declare(
+  kokkos-mdspan
+  SYSTEM
+  GIT_REPOSITORY https://github.com/kokkos/mdspan.git
+  GIT_TAG        stable
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(kokkos-mdspan)
+
+FetchContent_Declare(
+  magic_enum
+  SYSTEM
+  GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
+  GIT_TAG        v0.9.7
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(magic_enum)
+
 set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "Use external fmt library" FORCE)
 FetchContent_Declare(
   spdlog
@@ -128,17 +148,6 @@ FetchContent_Declare(
   GIT_PROGRESS   TRUE
 )
 FetchContent_MakeAvailable(spdlog)
-
-
-FetchContent_Declare(
-  kokkos-mdspan
-  SYSTEM
-  GIT_REPOSITORY https://github.com/kokkos/mdspan.git
-  GIT_TAG        stable
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
-)
-FetchContent_MakeAvailable(kokkos-mdspan)
 
 # Add sources
 add_subdirectory(src)

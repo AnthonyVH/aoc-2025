@@ -34,9 +34,36 @@ HWY_BEFORE_NAMESPACE();
 
 namespace aoc25 {
 
-  namespace HWY_NAMESPACE {
+  namespace detail {
 
-    namespace hn = hwy::HWY_NAMESPACE;
+    /** @brief Creates an array that can be loaded as a mask (i.e. each element is either all 0s or
+     * all 1s). All entries are set to zero, except for the last `num_digits` entries, which are set
+     * to all 1s.
+     */
+    template <std::integral T, size_t NumLanes>
+      requires std::is_unsigned_v<T>
+    constexpr std::array<T, NumLanes> mask_for_single_uint_conversion(size_t num_digits) {
+      std::array<T, NumLanes> result = {};  // Initialize all elements to zero.
+      for (size_t i = 0; i < num_digits; ++i) {
+        result[result.size() - 1 - i] = static_cast<T>(-1);
+      }
+      return result;
+    }
+
+    /** @brief Creates an array of mask data for the convert_single_uint functions. Each entry I in
+     * the array holds data for the mask for an I digit number. Note that the 0th entry is unused.
+     * It is generated to allow loading the required array entry directly with the digit count as
+     * index.
+     */
+    template <std::integral T, size_t NumLanes, size_t MaxDigits>
+    constexpr std::array<std::array<T, NumLanes>, MaxDigits + 1>
+    masks_array_for_single_uint_conversion() {
+      std::array<std::array<T, NumLanes>, MaxDigits + 1> result = {};
+      for (size_t digits = 1; digits <= MaxDigits; ++digits) {
+        result[digits] = mask_for_single_uint_conversion<T, NumLanes>(digits);
+      }
+      return result;
+    }
 
     template <class Ignore, class Mask>
     concept can_create_mask_from_uint = requires(uint32_t value) {
@@ -50,6 +77,12 @@ namespace aoc25 {
     struct call_mask_from_bits {
       static Mask call(uint32_t mask) { return Mask::FromBits(mask); }
     };
+
+  }  // namespace detail
+
+  namespace HWY_NAMESPACE {
+
+    namespace hn = hwy::HWY_NAMESPACE;
 
     // Based on: https://lemire.me/blog/2023/09/22/parsing-integers-quickly-with-avx-512/
     [[maybe_unused]] inline hn::VFromD<hn::Full128<uint32_t>> parse_10e8_integer_simd_reverse(
@@ -123,8 +156,11 @@ namespace aoc25 {
     template <class CallbackFn>
     void convert_single_uint64(simd_string_view_t input, CallbackFn && callback) {
       // Based on: https://lemire.me/blog/2023/09/22/parsing-integers-quickly-with-avx-512/
+      // Maximum digits for uint64_t is 20 (18'446'744'073'709'551'615).
+      [[maybe_unused]] static constexpr uint8_t max_digits = 20;
+
       auto const digit_count = input.size();
-      assert((digit_count > 0) && (digit_count <= 20));
+      assert((digit_count > 0) && (digit_count <= max_digits));
       assert((digit_count == 1) || (input[0] != '0'));
 
       // The code requires fixed 128- and 256-bit vectors, so use Full... tags.
@@ -140,42 +176,54 @@ namespace aoc25 {
       auto const simd_mask = [&] {
         using mask_t = hn::MFromD<decltype(tag_32x8)>;
 
-        if constexpr (can_create_mask_from_uint<CallbackFn, mask_t>) {
-          return call_mask_from_bits<CallbackFn, mask_t>::call(mask);
+        if constexpr (detail::can_create_mask_from_uint<CallbackFn, mask_t>) {
+          return detail::call_mask_from_bits<CallbackFn, mask_t>::call(mask);
         } else {
           // No way to directly load the mask. Need to create a vector and convert it.
           // See e.g.: https://stackoverflow.com/a/24242696/255803.
 
-          /* Note: The following, much simpler, code benchmarks slower:
+          /* Two alternatives to the LUT below:
            *
-           * return hn::SlideMaskUpLanes(tag_32x8, hn::FirstN(tag_32x8, digit_count),
-           *                             hn::Lanes(tag_32x8) - digit_count);
+           * - A very simple "direct" approach, benchmarks slower than the other alternative.
+           *
+           *   return hn::SlideMaskUpLanes(tag_32x8, hn::FirstN(tag_32x8, digit_count),
+           *                               hn::Lanes(tag_32x8) - digit_count);
+           *
+           * - A more complex approach using table lookups. Based on SO answer linked above.
+           *   Benchmarks more or less as fast as the LUT method used here.
+           * HWY_ALIGN static constexpr std::array<uint64_t, 4> shuffle_indices =
+           *     std::to_array<uint64_t>(
+           *         {0x0000000000000000, 0x0101010101010101,
+           *          0x0202020202020202, 0x0303030303030303});
+           *
+           * // Broadcast the mask to all 32-bit words in the vector.
+           * auto const broadcast_mask =
+           *     hn::BitCast(hn::Full256<uint8_t>{}, hn::Set(hn::Full256<uint32_t>{}, mask));
+           *
+           * // For each of the 32 bytes in the vector, select byte 0 from the input for the first
+           * // 8 mask bits, byte 1 for the next 8 mask bits, etc.
+           * auto const shuffled_bytes = hn::TableLookupBytes(
+           *     broadcast_mask,
+           *     hn::BitCast(hn::Full256<uint8_t>{},
+           *                 hn::Load(hn::Full256<uint64_t>{}, shuffle_indices.data())));
+           *
+           * // Create a mask to AND each byte with its corresponding bit in the mask.
+           * auto const and_mask = hn::BitCast(
+           *     hn::Full256<uint8_t>{}, hn::Set(hn::Full256<uint64_t>{},
+           *                                     0x80'40'20'10'08'04'02'01));
+           *
+           * // Generate a non-zero byte for each bit that is set in the mask.
+           * auto const masked_bits = hn::And(shuffled_bytes, and_mask);
+           *
+           * // Create final mask, where each entry is set if the AND produced a non-zero byte.
+           * return hn::Eq(masked_bits, and_mask);
            */
 
-          HWY_ALIGN static constexpr std::array<uint64_t, 4> shuffle_indices =
-              std::to_array<uint64_t>(
-                  {0x0000000000000000, 0x0101010101010101, 0x0202020202020202, 0x0303030303030303});
-
-          // Broadcast the mask to all 32-bit words in the vector.
-          auto const broadcast_mask =
-              hn::BitCast(hn::Full256<uint8_t>{}, hn::Set(hn::Full256<uint32_t>{}, mask));
-
-          // For each of the 32 bytes in the vector, select byte 0 from the input for the first 8,
-          // byte 1 for the next 8, etc.
-          auto const shuffled_bytes = hn::TableLookupBytes(
-              broadcast_mask,
-              hn::BitCast(hn::Full256<uint8_t>{},
-                          hn::Load(hn::Full256<uint64_t>{}, shuffle_indices.data())));
-
-          // Create a mask to AND each byte with its corresponding bit in the mask.
-          auto const and_mask = hn::BitCast(
-              hn::Full256<uint8_t>{}, hn::Set(hn::Full256<uint64_t>{}, 0x80'40'20'10'08'04'02'01));
-
-          // Generate a non-zero byte for each bit that is set in the mask.
-          auto const masked_bits = hn::And(shuffled_bytes, and_mask);
-
-          // Create final mask, where each entry is set if the AND produced a non-zero byte.
-          return hn::Eq(masked_bits, and_mask);
+          // Since there's only a few possible number of digits, using a LUT is fastest.
+          HWY_ALIGN static constexpr std::array masks =
+              detail::masks_array_for_single_uint_conversion<uint8_t, hn::Lanes(tag_32x8),
+                                                             max_digits>();
+          return hn::MaskFromVec(hn::Load(tag_32x8, masks[digit_count].data()));
         }
       }();
 
@@ -205,14 +253,14 @@ namespace aoc25 {
       // Maximum 64-bit unsigned integer is 1844 67440737 09551615 (20 digits).
       uint64_t result = base10_words[3];
 
-      if ((mask & 0xFFFFFFU) != 0) {
+      if (digit_count > 8) {
         auto const middle_part = base10_words[2];
-        result = result + 100000000ULL * middle_part;
+        result = result + 100'000'000ULL * middle_part;
 
-        if ((mask & 0xFFFFU) != 0) {
+        if (digit_count > 16) {
           auto const result_32bit = result;
           auto const high_part = base10_words[1];
-          result = result + 10000000000000000ULL * high_part;
+          result = result + 10'000'000'000'000'000ULL * high_part;
 
           if ((high_part > 1844) || (result < result_32bit)) [[unlikely]] {  // Check for overflow.
             throw std::overflow_error("Parsed uint64_t value is too large");
@@ -226,8 +274,11 @@ namespace aoc25 {
     template <class CallbackFn>
     void convert_single_uint16(simd_string_view_t input, CallbackFn && callback) {
       // Adapted from the convert_single_uint64() function.
+      // Maximum digits for uint16_t is 5 (65'535).
+      [[maybe_unused]] static constexpr uint8_t max_digits = 5;
+
       auto const digit_count = input.size();
-      assert((digit_count > 0) && (digit_count <= 5));
+      assert((digit_count > 0) && (digit_count <= max_digits));
       assert((digit_count == 1) || (input[0] != '0'));
 
       // The code requires fixed length vectors, so use Full... tags.
@@ -239,19 +290,24 @@ namespace aoc25 {
       auto const nine = hn::Set(tag_16x8, 9);
 
       // Set the last digit_count bits of the mask to 1.
-      uint16_t const mask = 0xFFFFULL << (hn::Lanes(tag_16x8) - digit_count);
+      [[maybe_unused]] uint16_t const mask = 0xFFFFULL << (hn::Lanes(tag_16x8) - digit_count);
       auto const simd_mask = [&] {
         using mask_t = hn::MFromD<decltype(tag_16x8)>;
 
-        if constexpr (can_create_mask_from_uint<CallbackFn, mask_t>) {
-          return call_mask_from_bits<CallbackFn, mask_t>::call(mask);
+        if constexpr (detail::can_create_mask_from_uint<CallbackFn, mask_t>) {
+          return detail::call_mask_from_bits<CallbackFn, mask_t>::call(mask);
         } else {
           // No way to directly load the mask. Need to create a vector and convert it.
           // See e.g.: https://stackoverflow.com/a/24242696/255803.
+          // An alterantive, slower than the LUT method used here, is:
+          //   return hn::SlideMaskUpLanes(tag_16x8, hn::FirstN(tag_16x8, digit_count),
+          //                               hn::Lanes(tag_16x8) - digit_count);
 
-          // TODO: Figure out the most efficient way to do this.
-          return hn::SlideMaskUpLanes(tag_16x8, hn::FirstN(tag_16x8, digit_count),
-                                      hn::Lanes(tag_16x8) - digit_count);
+          // Since there's only a few possible number of digits, using a LUT is fastest.
+          HWY_ALIGN static constexpr std::array masks =
+              detail::masks_array_for_single_uint_conversion<uint8_t, hn::Lanes(tag_16x8),
+                                                             max_digits>();
+          return hn::MaskFromVec(hn::Load(tag_16x8, masks[digit_count].data()));
         }
       }();
 
@@ -281,7 +337,7 @@ namespace aoc25 {
       // Maximum 16-bit unsigned integer is 65 535 (5 digits)
       uint16_t result = base10_words[2];  // Due to bit casting, result is at index 2.
 
-      if ((mask & 0xFFFU) != 0) {
+      if (digit_count > 4) {  // The first word holds the sum of the lower 4 digits.
         auto const prev_result = result;
         auto const high_part = base10_words[0];  // Again, result in odd place due to bit casting.
         result = result + 10'000U * high_part;
@@ -289,7 +345,7 @@ namespace aoc25 {
         SPDLOG_DEBUG("Inside the high part (high part: {}, prev result: {}, result: {})", high_part,
                      prev_result, result);
 
-        if ((high_part >= 7) || (result < prev_result)) [[unlikely]] {  // Check for overflow.
+        if ((high_part > 6) || (result < prev_result)) [[unlikely]] {  // Check for overflow.
           throw std::overflow_error("Parsed uint16_t value is too large");
         }
       }

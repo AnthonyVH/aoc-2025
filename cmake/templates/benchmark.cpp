@@ -114,6 +114,10 @@ namespace {
 }  // namespace
 
 int main(int argc, char ** argv) {
+  // If OpenMP is used, ensure that it keeps threads spinning and pinned to the same cores.
+  setenv("OMP_WAIT_POLICY", "active", 1);
+  setenv("OMP_PROC_BIND", "spread", 1);  // Any other option makes things (much) slower.
+
   // Disable ASLR, if possible, for more consistent benchmarking results.
   benchmark::MaybeReenterWithoutASLR(argc, argv);
 

@@ -2,6 +2,7 @@ add_day(10 DAY_10_LIB)
 
 target_link_libraries(${DAY_10_LIB}
   PRIVATE
+    eigen
     hwy
-    magic_enum::magic_enum
+    OpenMP::OpenMP_CXX
 )

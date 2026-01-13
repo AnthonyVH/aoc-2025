@@ -141,7 +141,6 @@ namespace aoc25 {
     uint64_t solve(part_t<1>, version_t<0>, simd_string_view_t input);
 
     uint64_t solve(part_t<2>, version_t<0>, simd_string_view_t input);
-    uint64_t solve(part_t<2>, version_t<1>, simd_string_view_t input);
   };
 
 }  // namespace aoc25

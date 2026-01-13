@@ -5,9 +5,12 @@
 #include "aoc25/simd.hpp"
 #include "aoc25/string.hpp"
 
+#include <Eigen/Core>
+#include <Eigen/src/Core/ArithmeticSequence.h>
+#include <Eigen/src/Core/util/Constants.h>
+#include <fmt/ostream.h>
 #include <fmt/ranges.h>
 #include <fmt/std.h>
-#include <magic_enum/magic_enum.hpp>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -15,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <numeric>
 #include <ranges>
 #include <type_traits>
@@ -47,6 +51,39 @@ HWY_AFTER_NAMESPACE();
 
 #ifdef HWY_ONCE
 
+// Enable formatting of Eigen matrices.
+namespace aoc25 {
+  namespace {
+
+    template <class T, class Enable = void>
+    struct is_eigen_type : std::false_type {};
+
+    template <class T>
+    struct is_eigen_type<Eigen::MatrixBase<T>, void> : std::true_type {};
+
+    template <class T>
+    struct is_eigen_type<T, std::enable_if_t<std::is_base_of_v<Eigen::PlainObjectBase<T>, T>>>
+        : std::true_type {};
+
+    template <class T>
+    inline constexpr bool is_eigen_type_v = is_eigen_type<T>::value;
+
+  }  // namespace
+}  // namespace aoc25
+
+namespace fmt {
+
+  template <typename T>
+    requires aoc25::is_eigen_type_v<T>
+  struct formatter<T> : ostream_formatter {};
+
+  template <typename T, typename Char>
+    requires aoc25::is_eigen_type_v<T>
+  struct range_format_kind<T, Char> : std::integral_constant<range_format, range_format::disabled> {
+  };
+
+};  // namespace fmt
+
 namespace aoc25 {
 
   namespace {
@@ -64,7 +101,7 @@ namespace aoc25 {
       uint8_t num_bits = 0;
     };
 
-    std::string format_as(problem_t const & obj) {
+    [[maybe_unused]] std::string format_as(problem_t const & obj) {
       return fmt::format("<target: {:#0{}b}, switches: {::#0{}b}, jolts: {::d}>", obj.target,
                          obj.num_bits + 2, obj.switches, obj.num_bits + 2, obj.jolts);
     }
@@ -123,7 +160,7 @@ namespace aoc25 {
         input.remove_prefix((comma_pos == simd_string_view_t::npos ? input.size() : comma_pos + 1));
       }
 
-      SPDLOG_DEBUG("Parsed {}", result);
+      SPDLOG_TRACE("Parsed {}", result);
       return result;
     }
 
@@ -143,499 +180,6 @@ namespace aoc25 {
         combo_diff &= ~(1ULL << switch_idx);  // Unset LSB.
       }
       return state;
-    }
-
-    void push_switch([[maybe_unused]] uint8_t switch_idx,
-                     std::span<uint16_t> remaining_jolts,
-                     uint16_t switch_bitmask,
-                     int16_t number_of_pushes) {
-      SPDLOG_TRACE("  [push_switch] switch {} ({:#b}) on state {} with change {}", switch_idx,
-                   switch_bitmask, remaining_jolts, number_of_pushes);
-      while (switch_bitmask != 0) {
-        size_t const idx = std::countr_zero(switch_bitmask);
-        assert(idx < remaining_jolts.size());
-        remaining_jolts[idx] -= number_of_pushes;
-        switch_bitmask &= ~(1ULL << idx);  // Unset LSB.
-      }
-    }
-
-    enum class solve_state_t {
-      no_solution,
-      found_solution,
-      skip_switch,
-    };
-
-    struct solve_result_t {
-      solve_state_t state = solve_state_t::no_solution;
-      uint16_t num_pushes = 0;
-    };
-
-    [[maybe_unused]] std::string format_as(solve_result_t const & obj) {
-      return fmt::format("<state: {}, num_pushes: {}>", magic_enum::enum_name(obj.state),
-                         obj.num_pushes);
-    }
-
-    template <class Caches>
-    [[maybe_unused]] solve_result_t solve_num_button_pushes_impl(
-        uint64_t & call_count,
-        Caches & caches,
-        problem_t const & problem,
-        uint16_t num_switch_pushes,
-        std::span<uint16_t> remaining_jolts,
-        uint8_t switch_idx,
-        std::optional<uint16_t> best_so_far) {
-      ++call_count;
-
-      if (auto const it = caches.at(switch_idx).find(remaining_jolts);
-          it != caches.at(switch_idx).end()) {
-        SPDLOG_TRACE("  [cache hit] switch_idx {}, state {} => {}", switch_idx, remaining_jolts,
-                     it->second);
-        return it->second;
-      } else if (std::ranges::all_of(remaining_jolts, [](auto const & e) { return e == 0; })) {
-        // TODO: Move this to the caller.
-        SPDLOG_INFO("Found solution for {} with {} switch pushes", problem, num_switch_pushes);
-        return {solve_state_t::found_solution, 0};
-      } else if (num_switch_pushes >= best_so_far.value_or(INT16_MAX)) {
-        // assert(false);  // TODO: Don't do this call if this is going to happen. And stop
-        // iterating.
-        return {.state = solve_state_t::no_solution, .num_pushes = 0};
-      } else if (switch_idx >= problem.switches.size()) {
-        // TODO: Catch this earlier and don't recurse?
-        return {.state = solve_state_t::no_solution, .num_pushes = 0};
-      }
-      if (best_so_far.has_value() &&
-          std::ranges::any_of(remaining_jolts, [&](auto const & e) { return e > *best_so_far; })) {
-        // Need more pushes than required to beat best.
-        return {.state = solve_state_t::no_solution, .num_pushes = 0};
-      }
-
-      // Push a switch.
-      auto result = solve_result_t{.state = solve_state_t::no_solution, .num_pushes = UINT16_MAX};
-      uint8_t const num_switches = problem.switches.size();
-      int16_t const max_remaining_pushes = best_so_far.value_or(INT16_MAX) - num_switch_pushes;
-
-      assert(switch_idx < num_switches);
-      auto const & cur_switch = problem.switches.at(switch_idx);
-
-      // Determine number of pushes needed to reach target for this switch.
-      SPDLOG_TRACE("  Calculating max pushes for switch {:d} ({:#b}), remaining: {}",
-                   cur_switch_idx, cur_switch, remaining_jolts);
-      int16_t max_pushes = max_remaining_pushes;
-      bool single_modify_found = false;
-
-      for (uint8_t target_idx = 0; target_idx < remaining_jolts.size(); ++target_idx) {
-        bool const switch_increments_jolt = (cur_switch & (1 << target_idx)) != 0;
-        if (switch_increments_jolt) {
-          // Check if any remaining switches can also modify this jolt.
-          bool const other_switches_modify =
-              std::ranges::any_of(problem.switches.begin() + switch_idx + 1, problem.switches.end(),
-                                  [target_idx](auto const & other_switch) {
-                                    return (other_switch & (1 << target_idx)) != 0;
-                                  });
-
-          if (!other_switches_modify) {  // This is the only switch modifying this jolt.
-            if (max_pushes < remaining_jolts[target_idx]) {
-              // Impossible to reach target for this jolt.
-              SPDLOG_DEBUG(
-                  "    Switch {:d} is only one modifying jolt {:d}, can't reach push target ({}) "
-                  "with {} max pushes",
-                  switch_idx, target_idx, remaining_jolts[target_idx], max_pushes);
-              max_pushes = 0;  // TODO: How do we skip this switch properly?
-              result = {.state = solve_state_t::skip_switch,
-                        .num_pushes = UINT16_MAX};  // Can't never find any solutions for
-                                                    // this switch given input state.
-              break;
-            } else if (single_modify_found && (max_pushes != remaining_jolts[target_idx])) {
-              // Two targets can only be modified by this switch, impossible.
-              SPDLOG_DEBUG(
-                  "    Switch {:d} is only one modifying jolt {:d}, but already had another "
-                  "single-modify target with different needed pushes ({} vs {})",
-                  switch_idx, target_idx, max_pushes, remaining_jolts[target_idx]);
-              max_pushes = 0;  // TODO: How do we skip this switch properly?
-              return {.state = solve_state_t::skip_switch,
-                      .num_pushes = UINT16_MAX};  // Can't never find any solutions for
-                                                  // this switch given input state.
-              break;
-            } else {
-              SPDLOG_TRACE(
-                  "    Switch {:d} is only one modifying jolt {:d}, setting max pushes to {}",
-                  cur_switch_idx, target_idx, remaining_jolts[target_idx]);
-              single_modify_found = true;
-              max_pushes = remaining_jolts[target_idx];
-            }
-          } else {
-            max_pushes = std::min<int16_t>(max_pushes, remaining_jolts[target_idx]);
-          }
-        }
-      }
-
-      if (result.state != solve_state_t::skip_switch) {
-        // If it might be possible to find a solution, try.
-
-        // If this is an "single modifying" switch or the last switch, only try the needed pushes.
-        bool const push_all = single_modify_found || ((switch_idx + 1) == num_switches);
-        uint16_t push_count = push_all ? max_pushes : 0;
-
-        SPDLOG_DEBUG("  Pushing switch {:d} ({:#b}) with state {}, max pushes: {}, push all: {}",
-                     switch_idx, cur_switch, remaining_jolts, max_pushes, push_all);
-
-        // Try all possible number of pushes for this switch.
-        uint16_t num_pushed = 0;
-        for (; push_count <= max_pushes; ++push_count) {
-          if (push_count > 0) {
-            num_pushed += (push_all ? max_pushes : 1);
-            push_switch(switch_idx, remaining_jolts, cur_switch, push_all ? max_pushes : 1);
-          }
-
-          SPDLOG_TRACE("    Calling next with state {}, switch pushes: {}", remaining_jolts,
-                       num_switch_pushes + push_count);
-          auto next_result = solve_num_button_pushes_impl(
-              call_count, caches, problem, num_switch_pushes + push_count, remaining_jolts,
-              switch_idx + 1,
-              (result.state == solve_state_t::found_solution) ? result.num_pushes : best_so_far);
-
-          /*
-      if (next_result.state == solve_state_t::skip_switch) {
-        SPDLOG_DEBUG("    Must skip switch {}", cur_switch_idx);
-        break;  // No solution possible with current starting state, return up.
-      } else
-      */
-          if (next_result.state == solve_state_t::found_solution) {
-            assert(next_result.num_pushes != UINT16_MAX);
-            result = {
-                .state = solve_state_t::found_solution,
-                .num_pushes =
-                    std::min<uint16_t>(result.num_pushes, next_result.num_pushes + push_count),
-            };
-            SPDLOG_DEBUG(
-                "    Found solution pushing switch {:d} a total of {} times: {} (total # pushes: "
-                "{})",
-                switch_idx, push_count, result, result.num_pushes + num_switch_pushes);
-          }
-        }
-
-        if (num_pushed > 0) {
-          push_switch(switch_idx, remaining_jolts, cur_switch, -num_pushed);
-        }
-      }
-
-      SPDLOG_DEBUG("  Returning result {} for switch_idx {}", result, switch_idx);
-      caches.at(switch_idx)
-          .emplace(std::vector(remaining_jolts.begin(), remaining_jolts.end()), result);
-      return result;
-    }
-
-    template <std::integral T>
-    struct span_hash_t {
-      using is_transparent = void;
-
-      std::size_t operator()(std::span<T const> const & span) const {
-        using data_t = std::remove_cvref_t<T>;
-
-        std::size_t seed = 0;
-        for (auto const & e : span) {
-          // Re-using the hash_combine logic
-          seed ^= std::hash<data_t>{}(e) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        }
-        return seed;
-      }
-    };
-
-    template <class T>
-    struct span_compare_t {
-      using is_transparent = void;
-
-      bool operator()(std::span<T const> const & lhs, std::span<T const> const & rhs) const {
-        return std::ranges::equal(lhs, rhs);
-      }
-    };
-
-    [[maybe_unused]] uint16_t solve_num_button_pushes(problem_t const & problem) {
-      SPDLOG_DEBUG("Solving {}", problem);
-      auto state = problem.jolts;
-
-      using cache_state_t [[maybe_unused]] = std::vector<uint16_t>;
-      using cache_t = std::unordered_map<cache_state_t, solve_result_t, span_hash_t<uint16_t>,
-                                         span_compare_t<uint16_t>>;
-      auto caches = std::vector<cache_t>(problem.switches.size() + 1);
-      uint64_t call_count = 0;
-
-      auto const result =
-          solve_num_button_pushes_impl(call_count, caches, problem, 0, state, 0, std::nullopt);
-      assert(result.state == solve_state_t::found_solution);
-      SPDLOG_INFO("{}, # button pushes: {}, total calls: {}", problem, result.num_pushes,
-                  call_count);
-      return result.num_pushes;
-    }
-
-    [[maybe_unused]] bool can_push_switch(std::span<uint16_t> jolts_remaining,
-                                          uint16_t switch_bits,
-                                          uint16_t num_pushes) {
-      while (switch_bits != 0) {
-        size_t const jolt_idx = std::countr_zero(switch_bits);
-        switch_bits &= ~(1ULL << jolt_idx);  // Unset LSB.
-        if (jolts_remaining[jolt_idx] < num_pushes) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    [[maybe_unused]] uint16_t max_switch_pushes(std::span<uint16_t> jolts_remaining,
-                                                uint16_t switch_bits) {
-      uint16_t max_pushes = UINT16_MAX;
-
-      while ((max_pushes > 0) && (switch_bits != 0)) {
-        size_t const jolt_idx = std::countr_zero(switch_bits);
-        switch_bits &= ~(1ULL << jolt_idx);  // Unset LSB.
-        max_pushes = std::min<uint16_t>(max_pushes, jolts_remaining[jolt_idx]);
-      }
-
-      return max_pushes;
-    }
-
-    std::optional<uint8_t> find_next_jolt(std::span<uint16_t const> jolt_to_switches,
-                                          std::span<uint16_t> jolts_remaining,
-                                          uint16_t active_switches) {
-      std::optional<uint8_t> best_jolt_idx = std::nullopt;
-      bool has_single_switch_jolt = false;
-
-      // Keep track of minimal remaining jolts.
-      uint16_t minimal_jolt_value = UINT16_MAX;
-
-      for (uint8_t jolt_idx = 0; !has_single_switch_jolt && (jolt_idx < jolts_remaining.size());
-           ++jolt_idx) {
-        uint16_t const jolt_value = jolts_remaining[jolt_idx];
-        if (jolt_value == 0) {
-          continue;
-        }
-
-        // Check if jolt can only be modified by a single switch.
-        uint16_t const modifying_switches = jolt_to_switches[jolt_idx] & active_switches;
-        uint8_t const num_modifying_switches = std::popcount(modifying_switches);
-        has_single_switch_jolt = (num_modifying_switches == 1);
-
-        if (num_modifying_switches == 0) {  // Required amount of jolts can't be reached.
-          return std::nullopt;
-        } else if (num_modifying_switches == 1) {
-          best_jolt_idx = jolt_idx;
-        } else if (jolt_value < minimal_jolt_value) {
-          // Select jolt if it has the minimal remaining jolts so far.
-          best_jolt_idx = jolt_idx;
-          minimal_jolt_value = jolt_value;
-        }
-      }
-
-      SPDLOG_TRACE("[find_next_jolt] candidate: {}", best_jolt_idx);
-      return best_jolt_idx;
-    }
-
-    uint16_t calc_min_remaining_pushes(std::span<uint16_t const> jolts_remaining,
-                                       std::span<uint16_t const> switches,
-                                       std::span<uint16_t const> jolt_to_switches,
-                                       [[maybe_unused]] uint16_t active_switches) {
-      uint16_t active_jolts = 0;
-      for (uint8_t jolt_idx = 0; jolt_idx < jolts_remaining.size(); ++jolt_idx) {
-        if (jolts_remaining[jolt_idx] != 0) {
-          active_jolts |= (1 << jolt_idx);
-        }
-      }
-
-      uint16_t result = 0;
-
-      while (active_jolts != 0) {
-        // Find largest remaining jolt.
-        auto const jolt_idx = [&] {
-          uint8_t max_jolt_idx = 0;
-          uint16_t max_jolts = 0;
-
-          auto remaining_jolts = active_jolts;
-          while (remaining_jolts != 0) {
-            uint8_t const idx = std::countr_zero(remaining_jolts);
-            remaining_jolts &= ~(1ULL << idx);  // Unset LSB.
-            if (jolts_remaining[idx] > max_jolts) {
-              max_jolt_idx = idx;
-              max_jolts = jolts_remaining[idx];
-            }
-          }
-          return max_jolt_idx;
-        }();
-
-        uint16_t const jolt_value = jolts_remaining[jolt_idx];
-        assert(jolt_value > 0);
-
-        // Need at least as many pushes as there are remaining jolts.
-        result += jolt_value;
-
-        // Create mask of all jolt positions modified by switches that modify this jolt.
-        // TODO: Take active switches into account? This must also be taken into account when
-        // selecting jolt though, because otherwise we might not be able to set it to 0.
-        uint16_t combined_switch_bits = 0;
-        uint16_t switches_for_jolt = jolt_to_switches[jolt_idx] & active_switches;
-        while (switches_for_jolt != 0) {
-          uint8_t const switch_idx = std::countr_zero(switches_for_jolt);
-          switches_for_jolt &= ~(1ULL << switch_idx);  // Unset LSB.
-          combined_switch_bits |= switches[switch_idx];
-        }
-
-        // Mask all jolts that are modified by these switches. This will likely make the estimated
-        // number of pushes too low, but it avoids having to deal with dependencies between
-        // switches.
-        active_jolts &= ~combined_switch_bits;
-        SPDLOG_TRACE(
-            "[calc_min_remaining_pushes] jolts remaining: {}, jolt_idx: {}, jolt_value: {}, "
-            "combined_switch_bits: {:#b}, active_jolts: {:#b},  active switches: {:#b}, result: {}",
-            jolts_remaining, jolt_idx, jolt_value, combined_switch_bits, active_jolts,
-            active_switches, result);
-
-        if (active_jolts & (1 << jolt_idx)) {  // Shouldn't happen.
-          // Some bug somewhere, we end up in an unreachable state.
-          return UINT16_MAX / 2;
-        }
-      }
-
-      return result;
-    }
-
-    [[maybe_unused]] bool has_unreachable_jolts(std::span<uint16_t const> jolts_remaining,
-                                                std::span<uint16_t const> jolt_to_switches,
-                                                uint16_t active_switches) {
-      for (uint8_t jolt_idx = 0; jolt_idx < jolts_remaining.size(); ++jolt_idx) {
-        if (jolts_remaining[jolt_idx] == 0) {
-          continue;
-        } else if ((jolt_to_switches[jolt_idx] & active_switches) == 0) {
-          SPDLOG_TRACE(
-              "[has_unreachable_jolts] jolt {} with remaining {} is unreachable with active "
-              "switches {:#b}",
-              jolt_idx, jolts_remaining[jolt_idx], active_switches);
-          return true;
-        }
-      }
-      return false;
-    }
-
-    void solve_jolts_impl(uint64_t & call_count,
-                          std::optional<uint16_t> & best_solution,
-                          std::span<uint16_t const> switches,
-                          std::span<uint16_t const> jolt_to_switches,
-                          std::span<uint16_t> jolts_remaining,
-                          uint16_t active_switches,
-                          uint16_t pushes_by_parent) {
-      [[maybe_unused]] uint8_t const log_indent = switches.size() - std::popcount(active_switches);
-
-      if (std::ranges::all_of(jolts_remaining, [](auto const & e) { return e == 0; })) {
-        SPDLOG_DEBUG("{:>{}s}Found solution, # pushes: {}", "", 2 * log_indent, pushes_by_parent);
-        best_solution = std::min(best_solution.value_or(UINT16_MAX), pushes_by_parent);
-        return;
-      }
-
-      ++call_count;  // Don't count "solution found" calls.
-
-      auto const jolt_idx = find_next_jolt(jolt_to_switches, jolts_remaining, active_switches);
-      if (!jolt_idx.has_value()) {
-        return;
-      }
-
-      uint16_t possible_switches = jolt_to_switches[*jolt_idx] & active_switches;
-      SPDLOG_TRACE("{:>{}}Checking switches {:#b} for jolt {}", "", 2 * log_indent,
-                   possible_switches, *jolt_idx);
-
-      while (possible_switches != 0) {
-        uint8_t const num_modifying_switches = std::popcount(possible_switches);
-        uint8_t const switch_idx = std::countr_zero(possible_switches);
-
-        possible_switches &= ~(1ULL << switch_idx);  // Unset LSB.
-        active_switches &= ~(1ULL << switch_idx);    // Disable switch for all future recursions.
-
-        // Determine minimum and maximum number of pushes for this switch.
-        uint16_t const jolt_value = jolts_remaining[*jolt_idx];
-        uint16_t const min_pushes = (num_modifying_switches == 1) ? jolt_value : 1;
-
-        uint16_t max_pushes = max_switch_pushes(jolts_remaining, switches[switch_idx]);
-        if (best_solution.has_value()) {
-          // Don't try pushes that can't beat the best result.
-          // TODO: Subtract minimum required pushes for remaining jolts.
-          auto const max_allowed_pushes = *best_solution - pushes_by_parent;
-          max_pushes = std::min<uint16_t>(max_pushes, max_allowed_pushes);
-        }
-
-        // Try pushing this switch up to the maximum number of times possible.
-        for (uint16_t num_pushes = max_pushes + 1; num_pushes-- > min_pushes;) {
-          assert(can_push_switch(jolts_remaining, switches[switch_idx], num_pushes));
-
-          // Push switch and recurse.
-          push_switch(switch_idx, jolts_remaining, switches[switch_idx], num_pushes);
-
-          // Disable any active switches which would modify jolts that are already zero.
-          auto usable_switches = active_switches;
-          for (uint8_t idx = 0; idx < jolts_remaining.size(); ++idx) {
-            if (jolts_remaining[idx] == 0) {  // Disable all switches modifying this jolt.
-              usable_switches &= ~jolt_to_switches[idx];
-            }
-          }
-
-          /*
-          bool const unreachable =
-              has_unreachable_jolts(jolts_remaining, jolt_to_switches, usable_switches);
-          if (unreachable) {
-            SPDLOG_TRACE(
-                "{:>{}s}Skipping switch {} ({:#b}) since it would lead to unreachable jolts", "",
-                2 * log_indent, switch_idx, switches[switch_idx]);
-          }
-          */
-
-          // Count miminum remaining pushes needed to reach target for remaining jolts.
-          // TODO: Is there a way not to calculate this in this loop?
-          uint16_t const min_remaining_child_pushes = calc_min_remaining_pushes(
-              jolts_remaining, switches, jolt_to_switches, usable_switches);
-          uint16_t const min_total_pushes =
-              pushes_by_parent + num_pushes + min_remaining_child_pushes;
-          SPDLOG_TRACE("{:>{}}min_remaining_child_pushes: {}, min_total_pushes: {}, best: {}", "",
-                       2 * log_indent, min_remaining_child_pushes, min_total_pushes, best_solution);
-
-          if (min_total_pushes < best_solution.value_or(UINT16_MAX)) {
-            SPDLOG_DEBUG(
-                "{:>{}s}Pushing switch {} ({:#b}) a total of {} times, jolts remaining: {}, "
-                "switches active: {} ({:#b})",
-                "", 2 * log_indent, switch_idx, switches[switch_idx], num_pushes, jolts_remaining,
-                std::popcount(usable_switches), usable_switches);
-            solve_jolts_impl(call_count, best_solution, switches, jolt_to_switches, jolts_remaining,
-                             usable_switches, pushes_by_parent + num_pushes);
-          }
-
-          // Undo pushes before trying next number of pushes.
-          push_switch(switch_idx, jolts_remaining, switches[switch_idx], -num_pushes);
-        }
-      }
-    }
-
-    uint16_t solve_jolts(problem_t const & problem) {
-      SPDLOG_DEBUG("Solving {}", problem);
-
-      // Prepare bookkeeping.
-      assert(problem.switches.size() <= 16);
-
-      std::optional<uint16_t> best_solution = std::nullopt;
-      auto jolts_remaining = problem.jolts;
-      uint16_t active_switches = (1ULL << problem.switches.size()) - 1;
-      [[maybe_unused]] uint64_t call_count = 0;
-
-      // For each jolt, keep track of which switches can modify it.
-      auto jolt_to_switches = std::vector<uint16_t>(problem.jolts.size());
-      for (uint8_t switch_idx = 0; switch_idx < problem.switches.size(); ++switch_idx) {
-        auto switch_bits = problem.switches[switch_idx];
-        while (switch_bits != 0) {
-          size_t const jolt_idx = std::countr_zero(switch_bits);
-          jolt_to_switches[jolt_idx] |= (1 << switch_idx);
-          switch_bits &= ~(1ULL << jolt_idx);  // Unset LSB.
-        }
-      }
-
-      solve_jolts_impl(call_count, best_solution, problem.switches, jolt_to_switches,
-                       jolts_remaining, active_switches, 0);
-      SPDLOG_INFO("{}, # button pushes: {}, total calls: {}", problem, best_solution.value(),
-                  call_count);
-      return best_solution.value();
     }
 
     // Structure holding precomputed tables of all values of 0-N bits, where each table lists (in
@@ -750,6 +294,815 @@ namespace aoc25 {
       std::array<std::span<uint16_t const>, N> tables_;
     };
 
+    Eigen::MatrixX<int64_t> switches_to_matrix(std::span<uint16_t const> switches,
+                                               size_t num_jolts) {
+      Eigen::MatrixX<int64_t> matrix = Eigen::MatrixX<int64_t>::Zero(num_jolts, switches.size());
+
+      // Switches are stored as bitmasks, so need to unpack.
+      for (size_t col = 0; col < switches.size(); ++col) {
+        uint16_t switch_bits = switches[col];
+
+        while (switch_bits != 0) {
+          size_t const row = std::countr_zero(switch_bits);
+          switch_bits &= ~(1ULL << row);  // Unset LSB.
+          matrix(row, col) = 1;
+        }
+      }
+
+      return matrix;
+    }
+
+    template <class T>
+    using DiagonalMatrixX = Eigen::DiagonalMatrix<T, Eigen::Dynamic>;
+
+    /**
+     * Computes Smith Normal Form, where D = PAQ.
+     * This version ignores P and only returns D and Q.
+     * @param input The input integer matrix.
+     * @return Tuple of (D, P, Q).
+     */
+    template <class T>
+    std::tuple<DiagonalMatrixX<T>, Eigen::MatrixX<T>, Eigen::MatrixX<T>>
+    calculate_smith_normal_form(Eigen::MatrixX<T> input) {
+      assert(input.rows() <= std::numeric_limits<uint8_t>::max());
+      assert(input.cols() <= std::numeric_limits<uint8_t>::max());
+      uint8_t const rows = input.rows();
+      uint8_t const cols = input.cols();
+      int const max_rank = std::min(rows, cols);
+
+      auto P = Eigen::MatrixX<T>::Identity(rows, rows).eval();
+      auto Q = Eigen::MatrixX<T>::Identity(cols, cols).eval();
+
+      for (int k = 0; k < max_rank; ++k) {
+        bool changed = true;
+
+        while (changed) {
+          changed = false;
+
+          // 1. Pivot selection: Find smallest non-zero element in submatrix.
+          int best_row = -1;
+          int best_col = -1;
+          auto const submatrix = input(Eigen::seq(k, rows - 1), Eigen::seq(k, cols - 1));
+          T const min_val = (submatrix.array() == 0)
+                                .select(std::numeric_limits<T>::max(), submatrix.cwiseAbs().array())
+                                .minCoeff(&best_row, &best_col);
+          best_row += k;
+          best_col += k;
+          bool const found_nonzero = min_val != std::numeric_limits<T>::max();
+
+          if (!found_nonzero) {
+            break;  // Entire submatrix is zero.
+          }
+
+          // Swap Rows (Track in P)
+          if (best_row != k) {
+            input.row(k).swap(input.row(best_row));
+            P.row(k).swap(P.row(best_row));
+          }
+
+          // Swap Columns (Track in Q)
+          if (best_col != k) {
+            input.col(k).swap(input.col(best_col));
+            Q.col(k).swap(Q.col(best_col));
+          }
+
+          // 2. Eliminate other entries in row k and column k
+          // Column elimination (row operations, so mirror on P).
+          for (int row = k + 1; row < rows; ++row) {
+            if (input(row, k) != 0) {
+              auto const quotient = input(row, k) / input(k, k);
+              input.row(row) -= quotient * input.row(k);
+              P.row(row) -= quotient * P.row(k);  // Mirror operation in P.
+              if (input(row, k) != 0) {
+                changed = true;
+              }
+            }
+          }
+
+          // Row elimination (column operations, so mirror on Q).
+          for (int col = k + 1; col < cols; ++col) {
+            if (input(k, col) != 0) {
+              auto const quotient = input(k, col) / input(k, k);
+              input.col(col) -= quotient * input.col(k);
+              Q.col(col) -= quotient * Q.col(k);  // Mirror operation in Q.
+              if (input(k, col) != 0) {
+                changed = true;
+              }
+            }
+          }
+        }
+
+        // 3. Ensure input diagonal is positive.
+        if (input(k, k) < 0) {
+          input.row(k) *= -1;
+          P.row(k) *= -1;
+        }
+      }
+
+      return std::make_tuple(DiagonalMatrixX<T>(input.diagonal()), std::move(P), std::move(Q));
+    }
+
+    /** @brief Calculate a linear system that generates all possible solutions to the given problem.
+     */
+    std::tuple<Eigen::VectorX<int16_t>, Eigen::MatrixX<int16_t>> generate_solution_system(
+        problem_t const & problem) {
+      // Solve system by first converting to Smith Normal Form.
+      // See e.g. http://www.numbertheory.org/php/axbmodm.html
+      auto const switch_matrix = switches_to_matrix(problem.switches, problem.jolts.size());
+      auto const target =
+          Eigen::Map<Eigen::VectorX<uint16_t> const>(problem.jolts.data(), problem.jolts.size())
+              .cast<int64_t>()
+              .eval();
+
+      auto const [snf_d, snf_p, snf_q] = calculate_smith_normal_form(switch_matrix);
+      auto b_alt = snf_p * target;
+      SPDLOG_TRACE(" [SNF] D: {}\nP:\n{}\nQ:\n{}\nb_alt: {}", snf_d.diagonal().transpose(), snf_p,
+                   snf_q, b_alt.transpose());
+
+      // Prepare base solution.
+      auto const [y, rank] = [&] {
+        auto result = Eigen::VectorX<int64_t>::Zero(snf_q.rows()).eval();
+
+        size_t const num_rows = std::min(b_alt.rows(), result.rows());
+        uint8_t row = 0;
+
+        for (; row < num_rows; ++row) {
+          auto const d_entry = snf_d.diagonal()(row);
+
+          if (d_entry == 0) {
+            break;  // D is diagonal, once an entry is zero, all following are zero too.
+          }
+
+          auto const div_result = std::div(b_alt(row), d_entry);
+          assert(div_result.rem == 0);  // Must be divisible.
+          result(row) = div_result.quot;
+        }
+
+        SPDLOG_TRACE("  [SNF] rank: {}, y: {}", row, result.transpose());
+        return std::make_tuple(std::move(result), row);
+      }();
+
+      auto const x_base = (snf_q * y).cast<int16_t>();
+      auto null_space =
+          snf_q(Eigen::placeholders::all, Eigen::placeholders::lastN(snf_q.cols() - rank))
+              .cast<int16_t>();
+      SPDLOG_TRACE("  [solution base] x_base: [{}], null space:{:s}{}", x_base.transpose().matrix(),
+                   (null_space.cols() == 0) ? " []" : "\n", null_space.matrix());
+
+      return std::make_tuple(x_base, null_space);
+    }
+
+    struct limits_t {
+      int16_t lower = std::numeric_limits<int16_t>::min();
+      int16_t upper = std::numeric_limits<int16_t>::max();
+    };
+
+    [[maybe_unused]] std::string format_as(limits_t const & obj) {
+      return fmt::format("[{}, {}]", obj.lower, obj.upper);
+    }
+
+    /** @brief Find the limits between which the null space column can be added to the solution
+     * while keeping all of the solution's entries positive.
+     */
+    limits_t calculate_limits(Eigen::VectorX<int16_t> const & solution,
+                              std::span<int16_t const> null_space_column) {
+      assert(static_cast<ssize_t>(null_space_column.size()) == solution.rows());
+
+      limits_t result;
+
+      for (int row = 0; row < solution.size(); ++row) {
+        auto const ns_value = null_space_column[row];
+        if (ns_value == 0) {  // Null space doesn't affect this row, so skip.
+          continue;
+        }
+
+        auto const sol_value = solution(row);
+        if (sol_value < 0) {
+          if (ns_value > 0) {
+            // Null space increases this row, which is currently negative. So calculate minimum
+            // number of additions to make it non-negative.
+            int16_t const min_additions = (-sol_value + (ns_value - 1)) / ns_value;
+            result.lower = std::max(result.lower, min_additions);
+          } else {
+            assert(ns_value < 0);
+            // Null space decreases this row, which is currently negative. So calculate minimum
+            // number of subtractions to make it non-negative. Since this is the minimum number of
+            // times we need to subtract a negative number, this is effectively a maximum number
+            // of additions. E.g. if we calculate that at least -5 additions are required, then
+            // adding only -4 would still leave the row negative.
+            int16_t const pos_ns_value = -ns_value;
+            int16_t const min_subtractions = (sol_value - (pos_ns_value - 1)) / pos_ns_value;
+            result.upper = std::min(result.upper, min_subtractions);
+          }
+        } else {
+          assert(sol_value >= 0);
+
+          if (ns_value > 0) {
+            // Null space increases this row, which is currently positive. So calculate maximum
+            // number of subtractions to keep it non-negative.
+            int16_t const max_subtractions = -sol_value / ns_value;
+            result.lower = std::max(result.lower, max_subtractions);
+          } else {
+            assert(ns_value < 0);
+            // Null space decreases this row, which is currently positive. So calculate maximum
+            // number of additions to keep it non-negative.
+            int16_t const max_additions = sol_value / -ns_value;
+            result.upper = std::min(result.upper, max_additions);
+          }
+        }
+      }
+
+      return result;
+    }
+
+    // A very basic simplex implementation.
+    // See e.g. https://www.cs.emory.edu/~cheung/Courses/253/Syllabus/ConstrainedOpt
+    struct simplex_t {
+      simplex_t(Eigen::RowVectorX<int16_t> const & objective,
+                Eigen::MatrixX<int16_t> const & constraints,
+                Eigen::VectorX<int16_t> const & bounds)
+          : tableau_{}, offsets_{} {
+        build_tableau(objective, constraints, bounds);
+      }
+
+      std::optional<std::pair<double, Eigen::RowVectorX<double>>> solve() {
+        if (!has_solution_) {
+          return std::nullopt;
+        }
+
+        solve_impl();
+
+        auto const objective_value = tableau_(0, Eigen::placeholders::last);
+        return std::make_pair(objective_value, extract_variables());
+      }
+
+     private:
+      static constexpr double epsilon = 1e-10;
+
+      Eigen::MatrixX<double> tableau_;
+      Eigen::RowVectorX<double> offsets_;
+      std::vector<bool> is_free_variable_;
+      bool has_solution_ = true;
+
+      static bool is_zero(double value) { return std::abs(value) < epsilon; }
+
+      static Eigen::MatrixX<double> fix_zeros(Eigen::MatrixX<double> obj) {
+        return obj.unaryExpr([](double value) { return (std::abs(value) < epsilon) ? 0. : value; });
+      }
+
+      template <class T>
+        requires aoc25::is_eigen_type_v<T>
+      static auto hide_negative_zero(T obj) {
+        return (obj.array().cwiseAbs() < epsilon).select(0., obj).matrix().eval();
+      }
+
+      static void check_canonical(Eigen::MatrixX<double> const & tableau) {
+        for (int col = 1; col < tableau.cols() - 1; ++col) {
+          auto const column = tableau.col(col);
+          auto const var_coeffs = column(Eigen::seq(1, Eigen::placeholders::last));
+          uint8_t const num_nonzero = (var_coeffs.array() != 0).count();
+
+          if (num_nonzero == 1) {  // Might be a canonical unit vector, i.e. basic variable.
+            int row = -1;          // Find location of non-zero element.
+            double const coeff = var_coeffs.maxCoeff(&row);
+
+            bool const is_basic_variable = (coeff == 1);
+            if (is_basic_variable) {
+              assert(column(0) == 0);  // Objective row must be zero.
+            }
+          }
+        }
+      }
+
+      Eigen::RowVectorX<double> extract_variables() const {
+        Eigen::RowVectorX<double> result = Eigen::RowVectorX<double>::Zero(offsets_.size());
+
+        // If variable is basic (i.e. canonical unit vector), get its value from the tableau.
+        static constexpr int first_variable_col = 1;
+        int var_col = first_variable_col;
+
+        auto const get_value_from_col = [&](int col) -> double {
+          auto const column = tableau_.col(col);
+          uint8_t const num_nonzero = (column.array() != 0).count();
+
+          if (num_nonzero == 1) {
+            int row = -1;  // Find location of non-zero element.
+            double const coeff = column.maxCoeff(&row);
+
+            if (coeff == 1) {  // Canonical unit vector, so basic variable. Result is in RHS.
+              return tableau_(row, Eigen::placeholders::last);
+            }
+          }
+
+          return 0.;
+        };
+
+        for (int var_idx = 0; var_idx < offsets_.cols(); ++var_idx) {
+          if (is_free_variable_.at(var_idx)) {
+            // Free variable, so represented by two variables in tableau.
+            double const pos_value = get_value_from_col(var_col);
+            double const neg_value = get_value_from_col(var_col + 1);
+            result(var_idx) = pos_value - neg_value;
+            var_col += 2;
+          } else {
+            // Regular variable, represented by single variable in tableau.
+            result(var_idx) = get_value_from_col(var_col);
+            var_col += 1;
+          }
+        }
+
+        result -= offsets_;
+
+        SPDLOG_TRACE("  simplex result: {}", result);
+        return result;
+      }
+
+      void build_tableau(Eigen::RowVectorX<int16_t> const & objective,
+                         Eigen::MatrixX<int16_t> const & constraints,
+                         Eigen::VectorX<int16_t> const & bounds) {
+        assert(objective.cols() == constraints.cols());
+        assert(bounds.rows() == constraints.rows());
+
+        // Check for lower bounds on variables, i.e. keep track of their offset.
+        // Also check which variables are maybe free, i.e. not explicitly bounded >= 0.
+        enum class bound_type_t : uint8_t { ignore, lower, upper };
+
+        is_free_variable_ = std::vector<bool>(constraints.cols(), true);
+        auto bound_types = std::vector<bound_type_t>(constraints.rows(), bound_type_t::ignore);
+        offsets_ = Eigen::RowVectorX<double>::Zero(constraints.cols());
+
+        for (int row = 0; row < constraints.rows(); ++row) {
+          // If all but one variable is zero, then that variable is non-free.
+          uint8_t const num_nonzero = (constraints.row(row).array() != 0).count();
+          int16_t const bound = bounds(row);
+
+          // If bound is negative, then number of pushes must be at least -bound, i.e. lower bound.
+          bound_types[row] = (bound < 0) ? bound_type_t::lower : bound_type_t::upper;
+
+          if (num_nonzero == 1) {
+            for (int col = 0; col < constraints.cols(); ++col) {
+              if (int16_t const coef = constraints(row, col); coef != 0) {
+                is_free_variable_.at(col) = coef < 0;
+
+                // If the bound is negative, the constraint is Ax >= b, with b = -bound. Thus, this
+                // is a lower bound on only this variable, which means we must replace it with a new
+                // variable x' = x - offset, where offset = b / A.
+                if (bound < 0) {
+                  // NOTE: Stored offset is negative.
+                  double lower_limit = static_cast<double>(bound) / coef;
+                  lower_limit =
+                      (lower_limit < 0) ? std::floor(lower_limit) : std::ceil(lower_limit);
+
+                  offsets_[col] = std::min(offsets_[col], lower_limit);
+
+                  // TODO: Using this info to remove the constraint breaks things...
+                  // bound_types[row] = bound_type_t::ignore;
+                }
+
+                break;
+              }
+            }
+          }
+        }
+
+        // After that we add slack variables for each constraint.
+        // Hence, the dimension of the tableau is:
+        //  - rows: # null vectors + 1 (for objective)
+        //  - cols: # variables + # slack variables + 2 * # surplus variables
+        //          (i.e. incl. artificial variables) + 1 (for RHS) + 1 for objective value.
+        size_t const num_unknowns = objective.cols();
+        size_t const num_free_variables = std::ranges::count(is_free_variable_, true);
+        size_t const num_variable_columns = num_unknowns + num_free_variables;
+
+        size_t const num_constraints = constraints.rows();
+        size_t const num_lower_bounds = std::ranges::count(bound_types, bound_type_t::ignore);
+
+        size_t const num_slack_variables = std::ranges::count(bound_types, bound_type_t::upper);
+        size_t const num_surplus_variables = std::ranges::count(bound_types, bound_type_t::lower);
+
+        size_t const num_rows = num_constraints - num_lower_bounds + 1;
+        size_t const num_cols =
+            num_variable_columns + num_slack_variables + 2 * num_surplus_variables + 1 + 1;
+
+        /* The format of the tableau is:
+         *
+         *  1 -C 0 0
+         *  0  A I b
+         *
+         * where:
+         *  - C is the cost vector (objective function coefficients)
+         *  - A is the constraint matrix
+         *  - I is the identity matrix for slack variables
+         *  - b is the bounds vector (RHS)
+         */
+        tableau_ = Eigen::MatrixX<double>::Zero(num_rows, num_cols);
+
+        // Put all constraints per variable into the tableau. This makes it much easier to
+        // deal with free variables for which we need to duplicate the columns. At this point we
+        // also set the objective coefficients, since these also might need to be duplicated.
+        //
+        // The objective should be minimized, so keep the signs. The simplex algorithm will maximize
+        // the objective, so we would negate the objective coefficients. However, to make the
+        // algorithm maximize, those coefficients must then be negated again, hence we would do a
+        // double negation.
+        int var_col = 1;
+        for (int var_idx = 0; var_idx < static_cast<int>(num_unknowns); ++var_idx) {
+          if (is_free_variable_.at(var_idx)) {
+            // Free variable, so represented by two variables in tableau.
+            tableau_(0, var_col) = objective(var_idx);
+            tableau_(0, var_col + 1) = -objective(var_idx);
+
+            tableau_.col(var_col).tail(num_constraints) = constraints.col(var_idx).cast<double>();
+            tableau_.col(var_col + 1).tail(num_constraints) =
+                -constraints.col(var_idx).cast<double>();
+            var_col += 2;
+          } else {
+            // Regular variable, represented by single variable in tableau.
+            tableau_(0, var_col) = objective(var_idx);
+            tableau_.col(var_col).tail(num_constraints) = constraints.col(var_idx).cast<double>();
+            var_col += 1;
+          }
+        }
+
+        // Set objective value entry.
+        tableau_(0, 0) = 1;
+
+        // Add constant due to offsets.
+        tableau_(0, Eigen::placeholders::last) = offsets_.dot(objective.cast<double>());
+
+        // Set the constraint coefficients, bounds, and slack/surplus/artificial variables.
+        /* There are two options:
+         *
+         *  - negative bound: when the solved variables are substituted back into the constraint,
+         *    the result must be >= -bound, to ensure the corresponding number of pushes becomes
+         *    positive. This means the constraint is of the form Ax >= b, where b is positive. In
+         *    this case we need to add a surplus variable, not a slack variable. We also have to add
+         *    an artificial variable to be able to find an initial basic feasible solution. Note
+         *    that neither a surplus, nor an artificial variable should be added if this constraint
+         *    is a lower bound on a single variable.
+         *
+         *  - positive bound: when the solved variables are substituted back into the constraint,
+         *    the result must be >= -bound, to ensure the corresponding number of pushes remains
+         *    positive. Since bounds must always be positive, we must first negate the constraint.
+         *    This reverses the inequality, i.e. the new constraints is of the form -Ax <= bound,
+         *    with bound positive. Since the inequality is now of the <= type, we need to add a
+         *    slack variable.
+         */
+        int slack_surplus_col = 1 + num_variable_columns;
+        int artificial_col = slack_surplus_col + num_slack_variables + num_surplus_variables;
+        int row_idx = 1;
+
+        for (size_t constraint_idx = 0; constraint_idx < num_constraints; ++constraint_idx) {
+          auto const bound_type = bound_types.at(constraint_idx);
+          if (bound_type == bound_type_t::ignore) {
+            continue;  // Skip constraints that are just variable bounds.
+          }
+
+          int16_t const bound = bounds(constraint_idx);
+          auto constraint = tableau_.row(row_idx);
+          bool negate_constraint = false;
+
+          if (bound_type == bound_type_t::lower) {           // Ax >= -bound
+            constraint(Eigen::placeholders::last) = -bound;  // Negate bound.
+
+            constraint(slack_surplus_col) = -1;  // Subtract surplus variable.
+            constraint(artificial_col) = 1;      // Add artificial variable.
+
+            ++slack_surplus_col;
+            ++artificial_col;
+          } else if (bound_type == bound_type_t::upper) {  // -Ax <= bound
+            negate_constraint = true;
+            constraint = -constraint;                       // Negate the constraint.
+            constraint(slack_surplus_col) = 1;              // Add slack variable.
+            constraint(Eigen::placeholders::last) = bound;  // Positive bound.
+
+            ++slack_surplus_col;
+          }
+
+          // Adjust for variable offsets. Need to use the original, not possibly duplicated due to
+          // free variables, constraint here.
+          constraint(Eigen::placeholders::last) +=
+              (negate_constraint ? -1 : 1) *
+              offsets_.dot(constraints.row(constraint_idx).cast<double>());
+
+          ++row_idx;
+        }
+
+        check_canonical(tableau_);
+
+        // If num_surplus_variables > 0, we need to perform Phase 1 of the two-phase simplex method
+        // to find an initial basic feasible solution.
+        if (num_surplus_variables > 0) {
+          run_phase_one(1 + num_variable_columns + num_slack_variables + num_surplus_variables,
+                        num_surplus_variables);
+        }
+
+        SPDLOG_TRACE("  has_solution: {}, offsets: [{}], tableau:\n{}", has_solution_, offsets_,
+                     hide_negative_zero(tableau_));
+      }
+
+      void fix_basic_variable_objective_coeffs(Eigen::MatrixX<double> & tableau) {
+        static constexpr int first_constraint_row = 1;
+
+        for (int col = 1; col < tableau.cols() - 1; ++col) {
+          auto const column = tableau.col(col);
+          if (column(0) == 0) {
+            continue;  // Objective coefficient is already zero.
+          }
+
+          auto const var_coeffs =
+              column(Eigen::seq(first_constraint_row, Eigen::placeholders::last));
+
+          if (uint8_t const num_nonzero = (var_coeffs.array() != 0).count(); num_nonzero == 1) {
+            int row = -1;  // Find location of non-zero element.
+            double const coeff = var_coeffs.maxCoeff(&row);
+
+            if (coeff != 1) {  // Not a canonical unit vector, i.e. not a basic variable, so skip.
+              continue;
+            }
+
+            assert(row != -1);
+            row += first_constraint_row;  // Fix row offset.
+
+            // Subtract multiple of this row from objective row to zero it out.
+            tableau.row(0) -= tableau(0, col) * tableau.row(row);
+          }
+        }
+      }
+
+      void run_phase_one(int artificial_vars_begin, int num_artificial_vars) {
+        // Keep track of the original objective function.
+        Eigen::RowVectorX<double> const original_objective = tableau_.row(0);
+
+        SPDLOG_TRACE("  [simplex] before Phase 1 tableau:\n{}", hide_negative_zero(tableau_));
+
+        // Set Phase 1 objective function to minize the sum of artificial variables (i.e. make
+        // them zero).
+        tableau_.row(0).setZero();
+        tableau_(0, 0) = 1;
+        tableau_(0, Eigen::placeholders::lastN(num_artificial_vars + 1)).setOnes();
+        tableau_(0, Eigen::placeholders::last) = 0;
+
+        SPDLOG_TRACE("  [simplex] pre-canonical phase 1 tableau:\n{}",
+                     hide_negative_zero(tableau_));
+
+        // Make all artificial variable columns canonical unit vectors.
+        static constexpr int first_constraint_row = 1;
+
+        for (int offset = 0; offset < num_artificial_vars; ++offset) {
+          int const artifical_var_col = artificial_vars_begin + offset;
+          int row = -1;
+          [[maybe_unused]] auto const value =
+              tableau_
+                  .col(artifical_var_col)(
+                      Eigen::seq(first_constraint_row, Eigen::placeholders::last))
+                  .maxCoeff(&row);
+          assert(value == 1);
+
+          // Fix row offset.
+          row += first_constraint_row;
+
+          // Subtract the constraint row from the objective row.
+          tableau_.row(0) -= tableau_.row(row);
+        }
+
+        SPDLOG_TRACE("  [simplex] initial phase 1 tableau:\n{}", hide_negative_zero(tableau_));
+
+        // Solve the system to find an initial basic feasible solution.
+        [[maybe_unused]] bool const success = solve_impl();
+        assert(success);
+
+        // Check that the objective value is zero, i.e. all artificial variables are zero. If not,
+        // there's no feasible solution.
+        has_solution_ = is_zero(tableau_(0, Eigen::placeholders::last));
+        if (!has_solution_) {
+          SPDLOG_TRACE("  [simplex] phase 1 found no feasible solution, objective value: {}",
+                       tableau_(0, Eigen::placeholders::last));
+          return;
+        }
+
+        // Restore original objective function.
+        tableau_.row(0) = original_objective;
+
+        // TODO: Check that artificial variables are zero in solution. I.e. they must not be basic
+        // variables.
+
+        // Ensure objective coeffients in columns of basic variables are zero.
+        fix_basic_variable_objective_coeffs(tableau_);
+
+        // Remove artificial variable columns from tableau.
+        // TODO: Benchmark this, if this is costly, just set columns to 0 instead.
+        // tableau_.middleCols(artificial_vars_begin, num_artificial_vars).setZero();
+        tableau_.col(artificial_vars_begin) = tableau_.rightCols(1);
+        tableau_.conservativeResize(Eigen::NoChange, tableau_.cols() - num_artificial_vars);
+
+        SPDLOG_TRACE("  [simplex] phase 1 after objective restore:\n{}",
+                     hide_negative_zero(tableau_));
+      }
+
+      bool solve_impl() {
+        assert(has_solution_);
+
+        static double constexpr limit = 0;
+        bool success = false;
+
+        check_canonical(tableau_);
+
+        while (true) {
+          // Find pivot column (most negative in objective row).
+          static constexpr int first_pivot_col = 1;
+
+          int pivot_col;
+          double min_val =
+              tableau_.row(0).middleCols(first_pivot_col, tableau_.cols() - 2).minCoeff(&pivot_col);
+
+          if (min_val >= limit) {  // Optimal found.
+            success = true;
+            break;
+          }
+
+          pivot_col += first_pivot_col;  // Fix pivot column offset.
+
+          // Find pivot row with lowest ratio.
+          int pivot_row = -1;
+          auto min_ratio = std::numeric_limits<double>::infinity();
+
+          for (int row_idx = 1; row_idx < tableau_.rows(); ++row_idx) {
+            auto row = tableau_.row(row_idx);
+
+            if (row(pivot_col) > limit) {
+              double const ratio = row(Eigen::placeholders::last) / row(pivot_col);
+
+              if (ratio < min_ratio) {
+                min_ratio = ratio;
+                pivot_row = row_idx;
+              }
+            }
+          }
+
+          assert(pivot_row != -1);  // A solution should always exist.
+
+          // Pivot operation.
+          tableau_.row(pivot_row) /= tableau_(pivot_row, pivot_col);
+
+          for (int row = 0; row < tableau_.rows(); ++row) {
+            if (row != pivot_row) {
+              tableau_.row(row) -= tableau_(row, pivot_col) * tableau_.row(pivot_row);
+            }
+          }
+
+          // Prevent numerical instability by fixing very small values to zero.
+          tableau_ = fix_zeros(std::move(tableau_));
+
+          SPDLOG_TRACE("  [simplex] pivot: ({}, {}), min_val: {}, tableau:\n{}", pivot_row,
+                       pivot_col, min_val, hide_negative_zero(tableau_));
+        }
+
+        SPDLOG_TRACE("  [simplex] has solution: {}, final tableau:\n{}", has_solution_,
+                     hide_negative_zero(tableau_));
+        return success;
+      }
+    };
+
+    [[maybe_unused]] void find_num_pushes_impl(Eigen::VectorX<int16_t> const & base,
+                                               Eigen::MatrixX<int16_t> const & constraints,
+                                               Eigen::RowVectorX<int16_t> const & objective,
+                                               double & best_target_change,
+                                               uint64_t & branch_counter,
+                                               uint8_t log_indent) {
+      branch_counter += 1;
+
+      // Run simplex to find optimal (floating point) solution.
+      auto simplex = simplex_t(objective, constraints, base);
+      auto simplex_result = simplex.solve();
+
+      if (!simplex_result.has_value()) {
+        SPDLOG_DEBUG(" {:{}}simplex found no solution", "", log_indent);
+        return;
+      }
+
+      auto const & [target_change, null_vector_changes] = simplex_result.value();
+
+      // Results are floating point, so don't do exact comparison.
+      auto const is_integer = [](double const val) {
+        static constexpr double epsilon = 1e-10;
+        return std::abs(std::round(val) - val) < epsilon;
+      };
+
+      // If the solution can't improve on the best found so far, stop searching.
+      if (target_change <= best_target_change) {
+        SPDLOG_DEBUG(" {:{}}pruning branch: target_change {} <= best_target_change {}", "",
+                     log_indent, target_change, best_target_change);
+        return;
+      }
+
+      // If the result is integer, the optimal solution for this branch is found.
+      bool const all_integers = std::ranges::all_of(null_vector_changes, is_integer);
+
+      if (all_integers) {
+        // Only update best solution if it's integer. Otherwise we might not branch correctly.
+        best_target_change = std::max(best_target_change, target_change);
+        SPDLOG_DEBUG(" {:{}}found integer solution: {}, target_change {}", "", log_indent,
+                     null_vector_changes, target_change);
+        return;
+      }
+
+      // No integer solution: branch and bound on fractional variables.
+      SPDLOG_DEBUG(
+          " {:{}}branching on fractional solution: target_change {}, null_vector_changes: {}", "",
+          log_indent, target_change, null_vector_changes);
+
+      // First find which values are fractional.
+      auto const is_fractional =
+          null_vector_changes |
+          std::views::transform([&](double const val) { return !is_integer(val); }) |
+          std::ranges::to<std::vector>();
+      uint8_t const num_fractional = std::ranges::count(is_fractional, true);
+      assert(num_fractional < 8);
+
+      // Use a counter as a bitmask to decide whether to create a lower or upper bound for each
+      // fractional variable.
+      uint8_t const num_branches = (1 << num_fractional);
+
+      for (uint8_t branch_idx = 0; branch_idx < num_branches; ++branch_idx) {
+        // Create extra constraints for this branch.
+        Eigen::VectorX<int16_t> extended_base =
+            Eigen::VectorX<int16_t>::Zero(base.rows() + num_fractional);
+        Eigen::MatrixX<int16_t> extended_constraints =
+            Eigen::MatrixX<int16_t>::Zero(constraints.rows() + num_fractional, constraints.cols());
+
+        extended_base.topRows(base.rows()) = base;
+        extended_constraints.topRows(constraints.rows()) = constraints;
+
+        uint8_t const row_offset = base.rows();
+        uint8_t fractional_idx = 0;
+
+        for (size_t var_idx = 0; var_idx < is_fractional.size(); ++var_idx) {
+          if (!is_fractional.at(var_idx)) {
+            continue;
+          }
+
+          double const val = null_vector_changes(var_idx);
+          bool const lower_not_upper = ((branch_idx >> fractional_idx) & 1) == 0;
+
+          if (lower_not_upper) {  // A negative base value is a lower bound constraint.
+            SPDLOG_DEBUG(" {:{}}branching on var {}: lower bound >= {}", "", log_indent, var_idx,
+                         std::ceil(val));
+            extended_base(row_offset + fractional_idx) = -std::ceil(val);
+            extended_constraints(row_offset + fractional_idx, var_idx) = 1;
+          } else {  // An positive base value is an upper bound constraint.
+            SPDLOG_DEBUG(" {:{}}branching on var {}: upper bound <= {}", "", log_indent, var_idx,
+                         std::floor(val));
+            extended_base(row_offset + fractional_idx) = std::floor(val);
+            extended_constraints(row_offset + fractional_idx, var_idx) = -1;
+          }
+
+          ++fractional_idx;
+        }
+
+        // Recurse into this branch.
+        find_num_pushes_impl(extended_base, extended_constraints, objective, best_target_change,
+                             branch_counter, log_indent + 2);
+      }
+    }
+
+    uint64_t find_num_pushes(Eigen::VectorX<int16_t> & x_base,
+                             Eigen::MatrixX<int16_t> const & null_space) {
+      // Calculate how null space column influences the total number of pushes.
+      Eigen::RowVectorX<int16_t> const push_influence = null_space.colwise().sum();
+      SPDLOG_TRACE(" push influence: {}", push_influence);
+
+      // If none of the columns influence the total number of pushes, just count the number of
+      // pushes in the base solution. We know there's a solution with a positive number of pushes,
+      // but we don't need to actually find it.
+      if (push_influence.isZero()) {
+        return x_base.sum();
+      }
+
+      // If there's only a single column in the null space, directly calculate optimal solution.
+      if (null_space.cols() == 1) {
+        // Calculate limits for each free variable in the null space.
+        auto const & null_space_col = null_space.col(0);
+        limits_t const limits = calculate_limits(x_base, std::span(null_space_col));
+        SPDLOG_TRACE(" limits: {}", limits);
+
+        // Determine optimal value within limits.
+        int16_t optimal_value = (push_influence(0) > 0) ? limits.lower : limits.upper;
+        return (x_base + optimal_value * null_space_col).sum();
+      } else {
+        double best_target_change = -std::numeric_limits<double>::infinity();
+        uint64_t branch_counter = 0;
+
+        // Branch and bound using simplex to find optimal integer solution.
+        find_num_pushes_impl(x_base, null_space, push_influence, best_target_change, branch_counter,
+                             0);
+        SPDLOG_DEBUG(" [branch-and-bound] branch count: {}, best target change: {}", branch_counter,
+                     best_target_change);
+
+        return x_base.sum() - std::round(best_target_change);
+      }
+    }
+
   }  // namespace
 
   uint64_t day_t<10>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
@@ -759,8 +1112,8 @@ namespace aoc25 {
     // basis, so we can't just do Gaussian elimination to find the solution.
     uint64_t total = 0;
 
-    // Iterate first over all values with 1 bit set, then 2 bits set, etc. This ensures that as soon
-    // as we find a solution, it is the minimum number of toggles and we can stop the search.
+    // Iterate first over all values with 1 bit set, then 2 bits set, etc. This ensures that as
+    // soon as we find a solution, it is the minimum number of toggles and we can stop the search.
     static constexpr size_t max_switches = 13;
     static constexpr combination_tables_t<max_switches> combination_tables;
 
@@ -771,8 +1124,8 @@ namespace aoc25 {
       auto const table = combination_tables.table_for(problem.switches.size());
 
       // Combinations are in Gray-code order, i.e. each entry differs from the previous one in
-      // exactly two bits. So keep track of previous state and just apply the difference. Note that
-      // when the number of set bits changes, the number of differences can be more than two.
+      // exactly two bits. So keep track of previous state and just apply the difference. Note
+      // that when the number of set bits changes, the number of differences can be more than two.
       // However, the loop handles this just fine.
       uint16_t prev_combo = 0;
       uint16_t state = 0;
@@ -786,7 +1139,7 @@ namespace aoc25 {
 
         if (state == problem.target) {
           uint16_t const num_used_switches = std::popcount(combo);
-          SPDLOG_DEBUG(" Found solution for {}: combo {:#0{}b} (# toggles: {})", problem, combo,
+          SPDLOG_DEBUG(" Found solution {:#0{}b} (# toggles: {})", combo,
                        problem.switches.size() + 2, num_used_switches);
           total += num_used_switches;
           break;  // Found solution is always the optimal one.
@@ -798,43 +1151,26 @@ namespace aoc25 {
   }
 
   uint64_t day_t<10>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
-    // Branch-and-bound:
-    //  - Complete number of pushes for 1 switch first. I.e. never increase once checking
-    //    the next switches.
-    //  - The limit is maximum value for each switch.
-    //  - Keep track of best solution with given state for given switch index. Then bail if
-    //    we get to that same state with same switch again.
-    //    => If we hash on the state & key index, we can't just return the # pushes, because
-    //       we might have reached the same state with a different number of pushes. So we
-    //       need to store the minimum number of pushes to get from that state to the target,
-    //       instead of from the start to the target.
-    //  - If a given switch is the only one remaining that modifies a certain target, then
-    //    it has to be instantly pushed the maximum number of times to reach the target. And
-    //    if not possible, then bail.
-    //  - Count state down to 0, instead of checking against target.
-    //  - What else can we prune on?
-    auto problems = parse_input(input);
+    auto const problems = parse_input(input);
+    uint64_t total = 0;
 
-    // Try switches which toggle more jolts first.
-    for (auto & problem : problems) {
-      std::ranges::sort(problem.switches, std::greater<>{},
-                        [](uint16_t switch_bits) { return std::popcount(switch_bits); });
+    // Around 40% speedup on work laptop.
+#  pragma omp parallel for reduction(+ : total) schedule(guided) num_threads(4)
+    for (auto const & problem : problems) {
+      // Obtain generator for all possible integer solution, with reduced number of free
+      // variables.
+      SPDLOG_DEBUG("Solving {}", problem);
+      auto [x_base, null_space] = generate_solution_system(problem);
+
+      // If the null space is empty, the only solution is already found. If not, we need to find
+      // the best possible solution.
+      uint64_t const num_pushes =
+          (null_space.cols() == 0) ? x_base.sum() : find_num_pushes(x_base, null_space);
+      total += num_pushes;
+      SPDLOG_DEBUG("  minimal solution with # pushes: {}", num_pushes);
     }
-    return 0;
 
-    // return std::accumulate(
-    //     problems.begin(), problems.end(), 0ULL,
-    //     [](uint64_t acc, auto const & problem) { return acc +
-    //     solve_num_button_pushes(problem);
-    //     });
-  }
-
-  uint64_t day_t<10>::solve(part_t<2>, version_t<1>, simd_string_view_t input) {
-    auto problems = parse_input(input);
-
-    return std::accumulate(
-        problems.begin(), problems.end(), 0ULL,
-        [](uint64_t acc, auto const & problem) { return acc + solve_jolts(problem); });
+    return total;
   }
 
 }  // namespace aoc25

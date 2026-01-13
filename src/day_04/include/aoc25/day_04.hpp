@@ -204,9 +204,9 @@ namespace aoc25 {
 
   template <>
   struct day_t<4> {
-    uint32_t solve(part_t<1>, version_t<0>, std::string_view input);
+    uint32_t solve(part_t<1>, version_t<0>, simd_string_view_t input);
 
-    uint32_t solve(part_t<2>, version_t<0>, std::string_view input);
+    uint32_t solve(part_t<2>, version_t<0>, simd_string_view_t input);
   };
 
 }  // namespace aoc25

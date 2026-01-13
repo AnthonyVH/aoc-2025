@@ -1,5 +1,7 @@
 #include "aoc25/day_04.hpp"
 
+#include "aoc25/simd.hpp"
+
 #include <fmt/base.h>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -18,52 +20,22 @@
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "src/day_04.cpp"
 
-// clang-format off
-#include <hwy/foreach_target.h>
-// clang-format on
-
-#include <hwy/highway.h>
-
-HWY_BEFORE_NAMESPACE();
-
-namespace aoc25 {
-  namespace {
-    namespace HWY_NAMESPACE {
-
-      namespace hn = hwy::HWY_NAMESPACE;
-
-      [[maybe_unused]] void compiler_stop_complaining() {}
-
-    }  // namespace HWY_NAMESPACE
-  }  // namespace
-}  // namespace aoc25
-
-HWY_AFTER_NAMESPACE();
-
 #ifdef HWY_ONCE
 
 namespace aoc25 {
-
   namespace {
 
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
-    }
-
     struct grid_t {
-      std::vector<int8_t> data;
+      simd_vector_t<uint8_t> data;
       size_t dimension;
 
-      std::span<int8_t> row(size_t row_idx) {
-        return std::span(const_cast<int8_t *>(std::as_const(*this).row(row_idx).data()),
-                         dimension + 2);
+      simd_span_t<uint8_t> row(size_t row_idx) {
+        return simd_span_t(data).subspan(row_idx * (dimension + 2), dimension + 2);
       }
 
-      std::span<int8_t const> row(size_t row_idx) const {
+      simd_span_t<uint8_t const> row(size_t row_idx) const {
         assert(row_idx < dimension + 2);
-        return std::span(data.data() + row_idx * (dimension + 2), dimension + 2);
+        return simd_span_t(data).subspan(row_idx * (dimension + 2), dimension + 2);
       }
     };
 
@@ -78,80 +50,268 @@ namespace aoc25 {
                           "\n"));
     }
 
-    grid_t to_grid(std::string_view input) {
-      // TODO: Implement this using SIMD.
-      [[maybe_unused]] size_t line_idx = 0;
-      grid_t result;
+    static constexpr uint8_t max_neighbors_for_removable_roll = 4;
 
-      // Assume a square grid. Each line has one extra character (the '\n'), so the total size of
-      // the input should equal N * (N + 1), where N is the dimension of the grid.
-      result.dimension = (std::sqrt(1 + 4 * input.size()) - 1) / 2;
+  }  // namespace
+}  // namespace aoc25
 
-      // Reserve space for the grid data, including one padding row on top and bottom, as well as
-      // one space of padding left and right.
-      result.data.resize((result.dimension + 2) * (result.dimension + 2));
+#endif  // HWY_ONCE
 
-      size_t pos = result.dimension + 3;  // Start after top padding row and left padding.
+// clang-format off
+#include <hwy/foreach_target.h>
+// clang-format on
 
-      while (!input.empty()) {
-        // Process whole line at a time.
-        auto const line = input.substr(0, result.dimension);
-        std::ranges::transform(line, result.data.begin() + pos,
-                               [](char c) { return (c == '@') ? 1 : 0; });
-        pos += result.dimension + 2;  // Skip padding at end of line and at begin of next line.
-        input.remove_prefix(result.dimension + 1);  // +1 to skip newline
+#include <hwy/highway.h>
+#include <hwy/print-inl.h>
+
+HWY_BEFORE_NAMESPACE();
+
+namespace aoc25 {
+  namespace {
+    namespace HWY_NAMESPACE {
+
+      namespace hn = hwy::HWY_NAMESPACE;
+
+      uint32_t count_removables(grid_t const & grid) {
+        // For the code below, note that since storage is aligned, and once row i is processed, we
+        // only ever touch rows > i. Hence it's fine to write into row i + 1's storage.
+        static constexpr hn::ScalableTag<uint8_t> tag{};
+        static constexpr size_t lanes = hn::Lanes(tag);
+
+        auto row_sum_a = simd_vector_t<uint8_t>(grid.dimension);
+        auto row_sum_b = simd_vector_t<uint8_t>(grid.dimension);
+        auto row_sum_c = simd_vector_t<uint8_t>(grid.dimension);
+
+        auto * prev_row_sum = &row_sum_a;
+        auto * cur_row_sum = &row_sum_b;
+        auto * next_row_sum = &row_sum_c;
+
+        // Accumulate sum across all rows and reduce at the end.
+        assert(grid.dimension < std::numeric_limits<uint8_t>::max());
+        auto removable_counts = hn::Zero(tag);
+
+        // Convert mask to vector of 0 & 1 by subtracting from zero.
+        auto const mask_to_ones = [](auto const & mask) {
+          static constexpr hn::ScalableTag<int8_t> signed_tag{};
+          return hn::BitCast(
+              tag, hn::Sub(hn::Zero(signed_tag), hn::BitCast(signed_tag, hn::VecFromMask(mask))));
+        };
+
+        // Start at row 0, which is actually row -1. That way all "intermediate" sums are ready to
+        // be used when the actual row 0 is processed.
+        for (size_t row_idx = 0; row_idx <= grid.dimension; ++row_idx) {
+          // Calculate sum of next row, and the result for the current row.
+          auto const next_grid_row = grid.row(row_idx + 1);
+          auto const * const HWY_RESTRICT next_row_src_ptr = next_grid_row.data();
+
+          auto const cur_grid_row =
+              grid.row(row_idx).subspan(1);  // Offset by one, because we skip left padding.
+
+          size_t const num_chunks = (grid.dimension + lanes - 1) / lanes;
+
+          for (size_t col_idx = 0; col_idx < num_chunks * lanes; col_idx += lanes) {
+            // Note that grid rows are padded with an extra cell on each side. I.e. the column index
+            // into grid_row is offset by -1 compared to the column index into the output row sums.
+            auto const grid_left = hn::LoadU(tag, next_row_src_ptr + col_idx + 0);
+            auto const grid_center = hn::LoadU(tag, next_row_src_ptr + col_idx + 1);
+            auto const grid_right = hn::LoadU(tag, next_row_src_ptr + col_idx + 2);
+            auto const sum_for_next_row = grid_center + grid_right + grid_left;
+            hn::Store(sum_for_next_row, tag, next_row_sum->data() + col_idx);
+
+            // Create final sum for current row by adding all row sums. Mask out cells which don't
+            // contain a roll of paper themselves.
+            auto const sum = sum_for_next_row + hn::Load(tag, prev_row_sum->data() + col_idx) +
+                             hn::Load(tag, cur_row_sum->data() + col_idx);
+            auto const is_reachable = sum <= hn::Set(tag, max_neighbors_for_removable_roll);
+
+            // Roll in own cell is counted as well. We need to mask out lanes past the end, because
+            // otherwise we might count cells from the next row.
+            uint8_t const num_valid_lanes = std::min<uint8_t>(lanes, grid.dimension - col_idx);
+            auto const has_roll =
+                hn::MaskedEq(hn::FirstN(tag, num_valid_lanes),
+                             hn::LoadU(tag, cur_grid_row.data() + col_idx), hn::Set(tag, 1));
+            auto const is_removable = hn::And(has_roll, is_reachable);
+
+            removable_counts += mask_to_ones(is_removable);
+          }
+
+          // Rotate row sums.
+          std::tie(prev_row_sum, cur_row_sum, next_row_sum) =
+              std::make_tuple(cur_row_sum, next_row_sum, prev_row_sum);
+        }
+
+        // Sum into wider lanes first, otherwise the result is an uint8_t, which overflows.
+        auto const summed_lanes = hn::SumsOf4(removable_counts);
+        return hn::ReduceSum(hn::DFromV<decltype(summed_lanes)>(), summed_lanes);
       }
 
-      return result;
+      /** @brief Calculate neighbors similarly to how we calculate sums for part 1. The big
+       * difference however is that we don't store a count, but rather a bitset indicating which of
+       * the 8 neighbors contain a roll of paper.
+       *
+       * See bitset_grid_t below for more details.
+       *
+       * @note A cell which doesn't contain a roll of paper itself will always have a zero bitset.
+       */
+      static simd_vector_t<uint8_t> calculate_neighbors(grid_t const & rolls) {
+        auto result = simd_vector_t<uint8_t>(rolls.dimension * rolls.dimension);
+
+        auto const get_out_row = [&](uint8_t row) -> simd_span_t<uint8_t> {
+          return simd_span_t(result).subspan(row * rolls.dimension, rolls.dimension);
+        };
+
+        auto row_mask_a = simd_vector_t<uint8_t>(rolls.dimension);
+        auto row_mask_b = simd_vector_t<uint8_t>(rolls.dimension);
+        auto row_mask_c = simd_vector_t<uint8_t>(rolls.dimension);
+
+        auto * prev_row_mask = &row_mask_a;
+        auto * cur_row_mask = &row_mask_b;
+        auto * next_row_mask = &row_mask_c;
+
+        // For the code below, note that since storage is aligned, and once row i is processed, we
+        // only ever touch rows > i. Hence it's fine to write into row i + 1's storage.
+        static constexpr hn::ScalableTag<uint8_t> tag{};
+        static constexpr size_t lanes = hn::Lanes(tag);
+
+        auto const calculate_row_masks = [&](uint8_t roll_row_idx, simd_span_t<uint8_t> dest,
+                                             auto callback_fn) {
+          // NOTE: The callback_fn is to allow using this code both for the first row calculation,
+          // as well as for the "rolling" calculation in the main loop.
+          auto const grid_row = rolls.row(roll_row_idx);
+          auto const * const HWY_RESTRICT src_ptr = grid_row.data();
+          auto * const HWY_RESTRICT dest_ptr = dest.data();
+
+          // Calculate a row's bitset, where bit 0 = center, 1 = right neighbor, 2 = left neighbor.
+          // Note the offset into the source data: the input grid has one extra column to the left,
+          // so offset 0 into the source equals 1 position to the left in the destination.
+          size_t const num_chunks = (rolls.dimension + lanes - 1) / lanes;
+
+          for (uint8_t idx = 0; idx < num_chunks * lanes; idx += lanes) {
+            auto const grid_chunk_left = hn::LoadU(tag, src_ptr + idx + 0);
+            auto const grid_chunk_center = hn::LoadU(tag, src_ptr + idx + 1);
+            auto const grid_chunk_right = hn::LoadU(tag, src_ptr + idx + 2);
+
+            auto const combined_cells = grid_chunk_center | hn::ShiftLeft<1>(grid_chunk_right) |
+                                        hn::ShiftLeft<2>(grid_chunk_left);
+
+            hn::Store(combined_cells, tag, dest_ptr + idx);
+
+            // "Forward" mask for further processing.
+            callback_fn(idx, combined_cells);
+          }
+        };
+
+        // Prepare row 0 masks (note that rows in rolls are offset by 1), to allow "rolling"
+        // calculation in next loop.
+        calculate_row_masks(1, *cur_row_mask, [](auto, auto) {});
+
+        for (size_t row_idx = 0; row_idx < rolls.dimension; ++row_idx) {
+          uint8_t const rolls_row_idx = row_idx + 1;  // Due to input grid padding by 1.
+
+          // Create final mask by combining masks from previous, current and next row.
+          auto cur_row = get_out_row(row_idx);
+
+          // Calculate bitset for next row.
+          calculate_row_masks(
+              rolls_row_idx + 1, *next_row_mask, [&](uint8_t col_idx, auto mask_for_next_row) {
+                // For each neighbor direction, set the corresponding bit if that neighbor has a
+                // roll. Note that each row mask contains bits for three directions per cell.
+                auto const has_roll =
+                    hn::TestBit(hn::LoadU(tag, cur_row_mask->data() + col_idx), hn::Set(tag, 1));
+                auto const bitmask =
+                    hn::ShiftLeft<5>(hn::LoadU(tag, prev_row_mask->data() + col_idx)) |
+                    hn::ShiftRight<1>(hn::LoadU(tag, cur_row_mask->data() + col_idx)) |
+                    hn::ShiftLeft<2>(mask_for_next_row);
+                auto const masked_bitmask = hn::And(bitmask, hn::VecFromMask(has_roll));
+
+                hn::StoreU(masked_bitmask, tag, cur_row.data() + col_idx);
+              });
+
+          // Rotate row masks.
+          std::tie(prev_row_mask, cur_row_mask, next_row_mask) =
+              std::make_tuple(cur_row_mask, next_row_mask, prev_row_mask);
+        }
+
+        return result;
+      }
+
+      grid_t to_grid(simd_string_view_t input) {
+        // Assume a square grid. Each line has one extra character (the '\n'), so the total size of
+        // the input should equal N * (N + 1), where N is the dimension of the grid.
+        size_t const grid_size = (std::sqrt(1 + 4 * input.size()) - 1) / 2;
+
+        [[maybe_unused]] size_t line_idx = 0;
+        auto result = grid_t{
+            // Reserve space for the grid data, including one padding row on top and bottom, as well
+            // as one space of padding left and right.
+            .data = simd_vector_t<uint8_t>((grid_size + 2) * (grid_size + 2)),
+            .dimension = grid_size,
+        };
+
+        assert((std::is_same_v<char, decltype(input)::value_type>));
+        auto const * HWY_RESTRICT src_ptr = reinterpret_cast<uint8_t const *>(input.data());
+        auto * HWY_RESTRICT dest_ptr = result.data.data();
+
+        dest_ptr += grid_size + 3;  // Start after top padding row and left padding.
+
+        for (size_t row = 0; row < grid_size; ++row) {
+          static constexpr hn::ScalableTag<uint8_t> tag{};
+          static constexpr size_t lanes = hn::Lanes(tag);
+          size_t const num_chunks = (grid_size + lanes - 1) / lanes;
+
+          // Input is either '.' or '@'. The ASCII value for '@' is higher, so we can do a
+          // saturating subtraction to convert to either 0 or 1.
+          auto const roll_mask = hn::Set(tag, static_cast<uint8_t>('@') - 1);
+
+          for (size_t idx = 0; idx < num_chunks * lanes; idx += lanes) {
+            // Need to mask out lanes past the end, to ensure those stay zero.
+            uint8_t const num_valid_lanes = std::min<uint8_t>(lanes, grid_size - idx);
+
+            auto const chunk = hn::LoadU(tag, src_ptr + idx);
+            auto const has_roll =
+                hn::MaskedSaturatedSub(hn::FirstN(tag, num_valid_lanes), chunk, roll_mask);
+
+            hn::StoreU(has_roll, tag, dest_ptr + idx);
+          }
+
+          src_ptr += grid_size + 1;   // +1 to skip newline
+          dest_ptr += grid_size + 2;  // Skip padding at end of line and at begin of next line.
+        }
+
+        return result;
+      }
+
+    }  // namespace HWY_NAMESPACE
+  }  // namespace
+}  // namespace aoc25
+
+HWY_AFTER_NAMESPACE();
+
+#ifdef HWY_ONCE
+
+namespace aoc25 {
+
+  namespace {
+
+    HWY_EXPORT(calculate_neighbors);
+
+    [[maybe_unused]]
+    simd_vector_t<uint8_t> calculate_neighbors(grid_t const & rolls) {
+      return HWY_DYNAMIC_DISPATCH(calculate_neighbors)(rolls);
     }
 
-    uint32_t count_removables(grid_t const & grid) {
-      uint32_t num_removable = 0;
+    HWY_EXPORT(count_removables);
 
-      auto const get_in_row = [&](uint8_t row, int8_t offset) -> std::span<int8_t const> {
-        return grid.row(row).subspan(1 + offset, grid.dimension);
-      };
+    [[maybe_unused]]
+    uint32_t count_removables(grid_t const & rolls) {
+      return HWY_DYNAMIC_DISPATCH(count_removables)(rolls);
+    }
 
-      auto row_sum_a = std::vector<int8_t>(grid.dimension);
-      auto row_sum_b = std::vector<int8_t>(grid.dimension);
-      auto row_sum_c = std::vector<int8_t>(grid.dimension);
+    HWY_EXPORT(to_grid);
 
-      auto * prev_row_sum = &row_sum_a;
-      auto * cur_row_sum = &row_sum_b;
-      auto * next_row_sum = &row_sum_c;
-
-      // Start at row 0, which is actually row -1. That way all "intermediate" sums are ready to be
-      // used when the actual row 0 is processed.
-      for (size_t row_idx = 0; row_idx <= grid.dimension; ++row_idx) {
-        // Calculate sum of next row.
-        auto const grid_row = grid.row(row_idx + 1);
-        for (size_t col_idx = 0; col_idx < grid.dimension; ++col_idx) {
-          // Note that grid rows are padded with one extra cell on each side.
-          (*next_row_sum)[col_idx] =
-              grid_row[col_idx + 0] + grid_row[col_idx + 1] + grid_row[col_idx + 2];
-        }
-
-        // Create final sum for current row by adding all row sums. Mask out cells which don't
-        // contain a roll of paper themselves.
-        static constexpr uint8_t max_neighboring_rolls_for_removable = 4;
-        auto const cur_row_has_roll = get_in_row(row_idx, 0);
-
-        for (size_t col_idx = 0; col_idx < grid.dimension; ++col_idx) {
-          auto const sum =
-              (*prev_row_sum)[col_idx] + (*cur_row_sum)[col_idx] + (*next_row_sum)[col_idx];
-
-          // Roll in own cell is counted as well.
-          bool const is_removable =
-              cur_row_has_roll[col_idx] & (sum <= max_neighboring_rolls_for_removable);
-          num_removable += is_removable;
-        }
-
-        // Swap row sums.
-        std::tie(prev_row_sum, cur_row_sum, next_row_sum) =
-            std::make_tuple(cur_row_sum, next_row_sum, prev_row_sum);
-      }
-
-      return num_removable;
+    [[maybe_unused]]
+    grid_t to_grid(simd_string_view_t input) {
+      return HWY_DYNAMIC_DISPATCH(to_grid)(input);
     }
 
     /** @brief Grid which stores which neighbor contains a paper roll, using a bitset.
@@ -160,7 +320,7 @@ namespace aoc25 {
     struct bitset_grid_t {
      public:
       explicit bitset_grid_t(grid_t const & rolls)
-          : neighbors_(calculate_neighbors(rolls))
+          : neighbors_(calculate_neighbors_impl(rolls))
           , mask_bit_idx_to_offset_{std::to_array<int16_t>({
                 +1,                                          // 0: right
                 -1,                                          // 1: left
@@ -184,17 +344,17 @@ namespace aoc25 {
         return operator[](row * dimension_ + col);
       }
 
-      std::span<uint8_t> row(uint8_t row_idx) {
-        return std::span(const_cast<uint8_t *>(std::as_const(*this).row(row_idx).data()),
-                         dimension_);
-      }
-
-      std::span<uint8_t const> row(uint8_t row_idx) const {
+      simd_span_t<uint8_t> row(uint8_t row_idx) {
         assert(row_idx < dimension_);
-        return std::span(neighbors_.data() + row_idx * dimension_, dimension_);
+        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
       }
 
-      int16_t mask_bit_idx_to_offset(uint8_t bit_idx) const {
+      simd_span_t<uint8_t const> row(uint8_t row_idx) const {
+        assert(row_idx < dimension_);
+        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
+      }
+
+      inline int16_t mask_bit_idx_to_offset(uint8_t bit_idx) const {
         // Faster than using a big lookup table of std::spans to offsets for each possible bitset.
         assert(bit_idx < mask_bit_idx_to_offset_.size());
         return mask_bit_idx_to_offset_[bit_idx];
@@ -226,69 +386,12 @@ namespace aoc25 {
      private:
       // Bitsets for each position in the grid. The format of the bitset, from MSB to LSB, is:
       // <above left> <above right> <above> <below left> <below right> <below> <left> <right>
-      std::vector<uint8_t> neighbors_;
+      simd_vector_t<uint8_t> neighbors_;
       std::array<int16_t, 8> mask_bit_idx_to_offset_;
       int16_t dimension_;
 
-      static std::vector<uint8_t> calculate_neighbors(grid_t const & rolls) {
-        auto result = std::vector<uint8_t>(rolls.dimension * rolls.dimension);
-
-        // Calculate neighbors similarly to how we calculate sums for part 1. The big difference
-        // however, is that we don't store a count, but rather a bitset indicating which of the 8
-        // neighbors contain a roll of paper.
-        // Note: A cell which doesn't contain a roll of paper itself will always have a zero bitset.
-        [[maybe_unused]] auto const get_in_row = [&](uint8_t row,
-                                                     int8_t offset) -> std::span<int8_t const> {
-          return rolls.row(row).subspan(1 + offset, rolls.dimension);
-        };
-
-        auto const get_out_row = [&](uint8_t row) -> std::span<uint8_t> {
-          return std::span(result.data() + row * rolls.dimension, rolls.dimension);
-        };
-
-        auto row_sum_a = std::vector<uint8_t>(rolls.dimension);
-        auto row_sum_b = std::vector<uint8_t>(rolls.dimension);
-        auto row_sum_c = std::vector<uint8_t>(rolls.dimension);
-
-        auto * prev_row_sum = &row_sum_a;
-        auto * cur_row_sum = &row_sum_b;
-        auto * next_row_sum = &row_sum_c;
-
-        auto const calculate_row_masks = [&](uint8_t roll_row_idx, std::span<uint8_t> dest) {
-          auto const grid_row = rolls.row(roll_row_idx);
-          for (size_t col_idx = 0; col_idx < rolls.dimension; ++col_idx) {
-            dest[col_idx] = (grid_row[col_idx + 0] << 2) | (grid_row[col_idx + 1] << 0) |
-                            (grid_row[col_idx + 2] << 1);
-          }
-        };
-
-        // Prepare row 0 sums (note that rows in rolls are offset by 1), to allow "rolling"
-        // calculation in next loop.
-        calculate_row_masks(1, *cur_row_sum);
-
-        for (size_t row_idx = 0; row_idx < rolls.dimension; ++row_idx) {
-          // Calculate bitset for next row.
-          uint8_t const rolls_row_idx = row_idx + 1;
-          calculate_row_masks(rolls_row_idx + 1, *next_row_sum);
-
-          // Create final sum for current row by adding all row sums.
-          auto cur_row = get_out_row(row_idx);
-
-          for (size_t col_idx = 0; col_idx < rolls.dimension; ++col_idx) {
-            // For each neighbor direction, set the corresponding bit if that neighbor has a roll.
-            // Note that each row sum contains bits for three directions per cell.
-            uint8_t const has_roll = (*cur_row_sum)[col_idx] & 1;
-            uint8_t const mask = ((*prev_row_sum)[col_idx] << 5) | ((*cur_row_sum)[col_idx] >> 1) |
-                                 ((*next_row_sum)[col_idx] << 2);
-            cur_row[col_idx] = has_roll * mask;
-          }
-
-          // Swap row sums.
-          std::tie(prev_row_sum, cur_row_sum, next_row_sum) =
-              std::make_tuple(cur_row_sum, next_row_sum, prev_row_sum);
-        }
-
-        return result;
+      static simd_vector_t<uint8_t> calculate_neighbors_impl(grid_t const & rolls) {
+        return calculate_neighbors(rolls);
       }
     };
 
@@ -302,12 +405,12 @@ namespace aoc25 {
 
   }  // namespace
 
-  uint32_t day_t<4>::solve(part_t<1>, version_t<0>, std::string_view input) {
+  uint32_t day_t<4>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
     auto const grid = to_grid(input);
     return count_removables(grid);
   }
 
-  uint32_t day_t<4>::solve(part_t<2>, version_t<0>, std::string_view input) {
+  uint32_t day_t<4>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
     auto const grid = to_grid(input);
     SPDLOG_DEBUG("Grid:\n{}", grid);
 
@@ -315,40 +418,43 @@ namespace aoc25 {
     SPDLOG_DEBUG("Neighbors grid:\n{}", neighbors_grid);
 
     // Populate initial removable positions.
-    uint16_t const dimension = neighbors_grid.dimension();
+    uint8_t const dimension = neighbors_grid.dimension();
 
-    std::vector<uint16_t> removable_positions;
-    removable_positions.reserve(dimension * dimension);
+    // Because push_back() is costing time, we side-step it by creating a maximum size vector.
+    auto removable_positions =
+        std::vector<uint16_t>(aoc25::count(simd_span_t{grid.data}, static_cast<uint8_t>(1)));
+    uint16_t num_removable = 0;
+    SPDLOG_DEBUG("# removable positions buffer size: {}", removable_positions.size());
 
     for (uint8_t row = 0; row < dimension; ++row) {
       auto const grid_row = grid.row(row + 1).subspan(1, dimension);
       auto const neighbors_row = neighbors_grid.row(row);
 
       for (uint8_t col = 0; col < dimension; ++col) {
-        if (bool const has_roll = (grid_row[col] == 1); has_roll) {
-          uint8_t const num_neighbors = std::popcount(neighbors_row[col]);
-          if (num_neighbors < 4) {
-            uint16_t const cell_idx = row * dimension + col;
-            removable_positions.push_back(cell_idx);
-          }
+        bool const has_roll = grid_row[col] == 1;
+        uint8_t const num_neighbors = std::popcount(neighbors_row[col]);
+
+        if (has_roll & (num_neighbors < max_neighbors_for_removable_roll)) {
+          uint16_t const cell_idx = row * dimension + col;
+          removable_positions[num_removable++] = cell_idx;
         }
       }
     }
+    SPDLOG_DEBUG("# initial removable positions: {}", num_removable);
 
     // Remove rolls until no more are accessible. Note that in this case, there's no need to check
     // whether the cell itself contains a roll of paper, since if it doesn't, it's not marked as a
     // neighbor in any other cell.
     uint32_t num_removed = 0;
 
-    while (!removable_positions.empty()) {
-      uint16_t const cell_idx = removable_positions.back();
-      removable_positions.pop_back();
+    while (num_removable > 0) {
+      uint16_t const cell_idx = removable_positions[--num_removable];
       SPDLOG_DEBUG("Processing cell {} (neighbors: {:08b})", cell_idx, neighbors_grid[cell_idx]);
 
       num_removed += 1;
 
       // Update neighbors, and enqueue any newly removable positions.
-      uint8_t neighbors_mask = neighbors_grid[cell_idx];
+      uint32_t neighbors_mask = neighbors_grid[cell_idx];
       while (neighbors_mask != 0) {
         uint8_t const bit_idx = std::countr_zero(neighbors_mask);
         neighbors_mask &= neighbors_mask - 1;  // Clear lowest set bit.
@@ -359,8 +465,12 @@ namespace aoc25 {
         uint8_t & neighbor_bits = neighbors_grid[neighbor_idx];
         uint8_t const num_neighbors = std::popcount(neighbor_bits);
 
-        if (num_neighbors <= 3) {  // Cell was already enqueued.
+        if (num_neighbors < max_neighbors_for_removable_roll) {  // Cell was already enqueued.
           continue;
+        } else if (num_neighbors == max_neighbors_for_removable_roll) {
+          // Update of neighbor_bits in the next lines unsets 1 bit, so if the number of set bits
+          // was 4 before, then the cell is now accessible (i.e. it will have exactly 3 neighbors).
+          removable_positions[num_removable++] = neighbor_idx;
         }
 
         SPDLOG_DEBUG(" Updating neighbor {:4d} (offset {:+4d}), bits: {:08b} (#: {}), mask: {:08b}",
@@ -369,12 +479,6 @@ namespace aoc25 {
 
         // Update neighbor's neighbor bitset to remove reference to this cell.
         neighbor_bits &= ~neighbors_grid.mask_bit_idx_to_neighbor_mask(bit_idx);
-
-        // Update of neighbor_bits unsets one bit, so if the number of set bits was 4 before,
-        // then the cell is now accessible.
-        if (num_neighbors == 4) {
-          removable_positions.push_back(neighbor_idx);
-        }
       }
     }
 

@@ -51,7 +51,7 @@ namespace aoc25 {
       static constexpr size_t lanes = hn::Lanes(word_tag);
 
       auto const targets = hn::Set(word_tag, static_cast<input_t>(value));
-      auto const * HWY_RESTRICT data = reinterpret_cast<input_t const *>(input.data());
+      auto const * const HWY_RESTRICT data = reinterpret_cast<input_t const *>(input.data());
 
       SPDLOG_TRACE("Counting {:?} occurences in {} element span", value, input.size());
 

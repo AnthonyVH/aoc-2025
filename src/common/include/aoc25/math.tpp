@@ -1,6 +1,33 @@
-#include "aoc25/math.hpp"
+#pragma once
+
+#include "aoc25/math.hpp"  // Only for IDE.
+
+#include <cassert>
 
 namespace aoc25 {
+
+  /// @brief Calculate the non-negative mod(value, modulus).
+  template <std::integral T, std::integral U>
+  constexpr T mod(T value, U modulus) {
+    assert(modulus > 0);
+    [[assume(modulus > 0)]];
+    auto const cast_mod = static_cast<T>(modulus);
+    return ((value % cast_mod) + cast_mod) % cast_mod;
+  }
+
+  constexpr uint64_t num_combinations(int8_t n, int8_t k) {
+    if ((k <= 0) || (k > n)) {
+      return 0;
+    }
+
+    uint64_t result = 1;
+    for (uint64_t d = 1; d <= static_cast<uint64_t>(k); ++d) {
+      result *= n--;
+      result /= d;
+    }
+
+    return result;
+  }
 
   /** From: https://stackoverflow.com/a/27670035
    *
@@ -14,7 +41,7 @@ namespace aoc25 {
    * 17 | 4    12 | 4       7 | 4     2 | 4
    * 16 | 4    11 | 4       6 | 4     1 | 4
    */
-  unsigned num_digits(uint64_t x) {
+  constexpr unsigned num_digits(uint64_t x) {
     return                                      // Num-># Digits->[0-9] 64->bits bs->Binary Search
         (x >= 10000000000ul                     // [11-20] [1-10]
              ? (x >= 1000000000000000ul         // [16-20] [11-15]

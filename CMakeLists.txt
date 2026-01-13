@@ -109,6 +109,16 @@ FetchContent_MakeAvailable(google-highway)
 target_compile_definitions(hwy PUBLIC HWY_COMPILE_ONLY_STATIC)
 
 FetchContent_Declare(
+  eigen
+  SYSTEM
+  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+  GIT_TAG        5.0.1
+  GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(eigen)
+
+FetchContent_Declare(
   fmt
   SYSTEM
   GIT_REPOSITORY https://github.com/fmtlib/fmt.git

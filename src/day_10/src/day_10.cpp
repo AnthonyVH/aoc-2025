@@ -1,6 +1,7 @@
 #include "aoc25/day_10.hpp"
 
 #include "aoc25/day.hpp"
+#include "aoc25/math.hpp"
 #include "aoc25/simd.hpp"
 #include "aoc25/string.hpp"
 
@@ -100,7 +101,8 @@ namespace aoc25 {
         while (!token.empty()) {
           auto const comma_pos = token.find(',');
           simd_string_view_t bit_token = token.substr(0, comma_pos);
-          auto const bit_pos = to_int<uint8_t>(bit_token);
+          assert(bit_token.size() == 1);
+          uint8_t const bit_pos = bit_token[0] - '0';
           switch_value |= (1 << bit_pos);
           token.remove_prefix(bit_token.size() + (comma_pos == simd_string_view_t::npos ? 0 : 1));
         }
@@ -132,24 +134,15 @@ namespace aoc25 {
       return result;
     }
 
-    uint16_t apply_switches(std::span<uint16_t const> switches, uint16_t switch_combo) {
-      uint16_t result = 0;
-      while (switch_combo != 0) {
-        size_t const switch_idx = std::countr_zero(switch_combo);
-        result ^= switches[switch_idx];
-        switch_combo &= ~(1ULL << switch_idx);  // Unset LSB.
+    uint16_t apply_diff_switches(std::span<uint16_t const> switches,
+                                 uint16_t combo_diff,
+                                 uint16_t state) {
+      while (combo_diff != 0) {
+        size_t const switch_idx = std::countr_zero(combo_diff);
+        state ^= switches[switch_idx];
+        combo_diff &= ~(1ULL << switch_idx);  // Unset LSB.
       }
-      return result;
-    }
-
-    [[maybe_unused]] bool is_state_overflowed(std::span<uint16_t const> state,
-                                              std::span<uint16_t const> target) {
-      for (size_t idx = 0; idx < state.size(); ++idx) {
-        if (state[idx] > target[idx]) {
-          return true;
-        }
-      }
-      return false;
+      return state;
     }
 
     void push_switch([[maybe_unused]] uint8_t switch_idx,
@@ -645,44 +638,160 @@ namespace aoc25 {
       return best_solution.value();
     }
 
+    // Structure holding precomputed tables of all values of 0-N bits, where each table lists (in
+    // order) all possible combinations of least to most bits set.
+    template <size_t N>
+    class combination_tables_t {
+     public:
+      constexpr combination_tables_t() {
+        // Generate all tables.
+        uint16_t * table_begin = data_.data();
+        std::span<uint16_t const> prev_table;
+
+        for (uint8_t num_bits = 1; num_bits <= N; ++num_bits) {
+          uint16_t * const table_end = generate_gray_table_for(table_begin, num_bits, prev_table);
+          assert(static_cast<size_t>(table_end - table_begin) == table_size(num_bits));
+          tables_[num_bits - 1] = std::span<uint16_t const>(table_begin, table_end);
+          prev_table = tables_[num_bits - 1];
+          table_begin = table_end;
+        }
+      }
+
+      constexpr std::span<uint16_t const> table_for(size_t num_bits) const {
+        assert(num_bits > 0);
+        assert(num_bits <= N);
+        return tables_[num_bits - 1];
+      }
+
+     private:
+      static constexpr size_t table_size(size_t num_bits) {
+        // Number of bits in a table for X bits is 2^X - 1, since we don't include the 0 value.
+        return (1ull << num_bits) - 1;
+      }
+
+      static constexpr size_t total_table_size(size_t max_num_bits) {
+        assert(max_num_bits > 0);
+        auto const num_bits =
+            std::views::iota(size_t{1}, max_num_bits + 1) | std::views::transform(table_size);
+        return std::accumulate(num_bits.begin(), num_bits.end(), 0ull);
+      }
+
+      /// @brief Generate table for N bits and store result at dest.
+      /// @return Pointer past the end of the generated table.
+      static constexpr uint16_t * generate_gray_table_for(
+          uint16_t * dest,
+          uint8_t num_bits,
+          std::span<uint16_t const> previous_table) {
+        /* Generate table as a Gray code, where each element only differs from the previous one in
+         * two places. The algorithm implemented here uses the Revolving Door method. An alternative
+         * is Chase's sequence.
+         * See e.g.:
+         *  - https://encyclopediaofmath.org/wiki/Gray_code
+         *  - https://www.baeldung.com/cs/generate-k-combinations
+         */
+
+        // List consists of the concatenation of:
+        //  - result for k bits set for num_bits - 1,
+        //  - reversed result for k - 1 bits set for num_bits - 1, with the bit at num_bits set.
+
+        // First find the begin and end position of combinations with k bits in the previous table.
+        auto const sum_of_num_combinations = [](int8_t n, int8_t k) -> size_t {
+          if (k <= 0) {
+            return 0;
+          }
+
+          auto const num_combos =
+              std::views::iota(int8_t{1}, static_cast<int8_t>(k + 1)) |
+              std::views::transform([n](int8_t bits_set) { return num_combinations(n, bits_set); });
+          return std::accumulate(num_combos.begin(), num_combos.end(), 0ull);
+        };
+
+        for (uint8_t num_bits_set = 1; num_bits_set <= num_bits; ++num_bits_set) {
+          {  // Copy entries from previous table with K bits set.
+            size_t const prev_index_cur_k_begin =
+                sum_of_num_combinations(num_bits - 1, num_bits_set - 1);
+            size_t const prev_index_cur_k_size = num_combinations(num_bits - 1, num_bits_set);
+            auto const prev_table_entries_cur_k =
+                previous_table.subspan(prev_index_cur_k_begin, prev_index_cur_k_size);
+
+            auto const copy_result = std::ranges::copy(prev_table_entries_cur_k, dest);
+            dest = copy_result.out;
+          }
+
+          {  // Copy entries from previous table with K - 1 bits set.
+            size_t const prev_index_prev_k_begin =
+                sum_of_num_combinations(num_bits - 1, num_bits_set - 2);
+            size_t const prev_index_prev_k_size = num_combinations(num_bits - 1, num_bits_set - 1);
+
+            // If list is empty, treat it as a list with an unset bitstring.
+            if (prev_index_prev_k_size == 0) {
+              *dest++ = 1 << (num_bits - 1);
+            } else {
+              auto const prev_table_entries_prev_k =
+                  previous_table.subspan(prev_index_prev_k_begin, prev_index_prev_k_size);
+
+              auto const reversed_and_transformed =
+                  prev_table_entries_prev_k | std::views::reverse |
+                  std::views::transform(
+                      [num_bits](uint16_t value) { return value | (1 << (num_bits - 1)); });
+              auto const copy_result = std::ranges::copy(reversed_and_transformed, dest);
+              dest = copy_result.out;
+            }
+          }
+        }
+
+        return dest;
+      }
+
+      static constexpr size_t max_bits = 15;
+      static_assert(N <= max_bits, "Combination tables only supported up to 8 bits");
+
+      std::array<uint16_t, total_table_size(N)> data_;
+      std::array<std::span<uint16_t const>, N> tables_;
+    };
+
   }  // namespace
 
   uint64_t day_t<10>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    // NOTE: To generate things fast, iterate using Gray code. Convert the new bit that would be
-    // toggled into an index (i.e. countr_zero(counter), with counter just a regular
-    // incrementing counter), then XOR with that. This should also convert into SIMD extremely
-    // efficiently, since we only need to add
     auto const problems = parse_input(input);
 
+    // Note: the "problem.switches" is a spanning set, but not a minimum spanning set, i.e. not a
+    // basis, so we can't just do Gaussian elimination to find the solution.
     uint64_t total = 0;
 
-    for (auto const & problem : problems) {
-      // Dumb way, just iterate, whatever. Optimize to O(n * 2^(m / 2)) later. Also check if
-      // just using SIMD in O(n * 2^m) is faster, due to less helper structures. Or iterate over
-      // all possible solution in # toggles order, but this might be expensive if the solution
-      // has many toggles.
-      // Note: the "problem.switches" is a spanning set, but not a minimum spanning set, i.e.
-      // not a basis, so we can't just do Gaussian elimination to find the solution.
-      SPDLOG_DEBUG("Solving {}", problem);
+    // Iterate first over all values with 1 bit set, then 2 bits set, etc. This ensures that as soon
+    // as we find a solution, it is the minimum number of toggles and we can stop the search.
+    static constexpr size_t max_switches = 13;
+    static constexpr combination_tables_t<max_switches> combination_tables;
 
-      uint8_t min_toggles = UINT8_MAX;
-      uint16_t const max_combos = 1ULL << problem.switches.size();
-      for (uint16_t combo = 0; combo < max_combos; ++combo) {
-        uint16_t state = apply_switches(problem.switches, combo);
+    for (auto const & problem : problems) {
+      SPDLOG_DEBUG("Solving {} ({} switches)", problem, problem.switches.size());
+      assert(problem.switches.size() <= max_switches);
+
+      auto const table = combination_tables.table_for(problem.switches.size());
+
+      // Combinations are in Gray-code order, i.e. each entry differs from the previous one in
+      // exactly two bits. So keep track of previous state and just apply the difference. Note that
+      // when the number of set bits changes, the number of differences can be more than two.
+      // However, the loop handles this just fine.
+      uint16_t prev_combo = 0;
+      uint16_t state = 0;
+
+      for (uint16_t idx = 0; (idx < table.size()); ++idx) {
+        uint16_t const combo = table[idx];
+        uint16_t const combo_diff = prev_combo ^ combo;  // Determine which bits changed.
+        prev_combo = combo;
+
+        state = apply_diff_switches(problem.switches, combo_diff, state);
 
         if (state == problem.target) {
-          uint8_t const num_toggles = std::popcount(combo);
-          SPDLOG_DEBUG("Found solution for {}: combo {:#0{}b} (# toggles: {})", problem, combo,
-                       problem.switches.size() + 2, num_toggles);
-          min_toggles = std::min(min_toggles, num_toggles);
+          uint16_t const num_used_switches = std::popcount(combo);
+          SPDLOG_DEBUG(" Found solution for {}: combo {:#0{}b} (# toggles: {})", problem, combo,
+                       problem.switches.size() + 2, num_used_switches);
+          total += num_used_switches;
+          break;  // Found solution is always the optimal one.
         }
       }
-      if (min_toggles == UINT8_MAX) {
-        throw std::runtime_error(fmt::format("No solution found for {}", problem));
-        min_toggles = 0;
-      }
-
-      total += min_toggles;
     }
 
     return total;

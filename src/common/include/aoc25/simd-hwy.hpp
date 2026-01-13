@@ -86,7 +86,7 @@ namespace aoc25 {
 
       auto const get_inc_words = [](auto const equals) {
         // Convert equality mask to increment vector by subtracting from zero.
-        return hn::BitCast(word_tag,
+        return hn::BitCast(accum_tag,
                            hn::Sub(hn::Zero(signed_word_tag),
                                    hn::BitCast(signed_word_tag, hn::VecFromMask(equals))));
       };

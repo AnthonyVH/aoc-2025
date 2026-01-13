@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aoc25/day.hpp"
+#include "aoc25/simd.hpp"
 
 #include <span>
 #include <string_view>
@@ -127,15 +128,9 @@ namespace aoc25 {
 
   template <>
   struct day_t<1> {
-    int solve(part_t<1>, version_t<0>, std::string_view input);
-    int solve(part_t<1>, version_t<1>, std::string_view input);
-    int solve(part_t<1>, version_t<2>, std::string_view input);
+    int solve(part_t<1>, version_t<0>, simd_string_view_t input);
 
-    int solve(part_t<2>, version_t<0>, std::string_view input);
-    int solve(part_t<2>, version_t<1>, std::string_view input);
+    int solve(part_t<2>, version_t<0>, simd_string_view_t input);
   };
-
-  void mod_dial(std::span<int16_t> in);
-  uint16_t count_zeros(std::span<int16_t const> in);
 
 }  // namespace aoc25

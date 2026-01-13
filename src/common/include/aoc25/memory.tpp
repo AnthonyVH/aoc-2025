@@ -2,9 +2,6 @@
 
 #include "aoc25/memory.hpp"  // Enable IDE syntax highlighting.
 
-#include <spdlog/pattern_formatter.h>
-#include <spdlog/spdlog.h>
-
 #include <new>
 
 namespace aoc25 {

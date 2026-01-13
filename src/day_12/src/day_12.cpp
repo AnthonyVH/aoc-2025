@@ -6,7 +6,6 @@
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
-#include <mdspan/mdspan.hpp>
 #include <spdlog/spdlog.h>
 #include <sys/types.h>
 
@@ -15,7 +14,21 @@
 #include <cstdint>
 #include <numeric>
 #include <ranges>
+#include <stdexcept>
 #include <type_traits>
+
+namespace aoc25 {
+  namespace {
+
+    // Each line in the problem has the format: "WWxHH: AA BB CC ... XX", where WW is width, HH is
+    // height, and (AA, BB, ..., XX) are the number of presents of a given index to be placed inside
+    // the region. Note that there's a newline at the end.
+    constexpr size_t problem_line_length(size_t num_presents) {
+      return 2 + 1 + 2 + 2 + (num_presents * (2 + 1));
+    }
+
+  }  // namespace
+}  // namespace aoc25
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "src/day_12.cpp"
@@ -34,7 +47,101 @@ namespace aoc25 {
 
       namespace hn = hwy::HWY_NAMESPACE;
 
-      [[maybe_unused]] void compiler_stop_complaining() {}
+      uint8_t num_hash_occurences(simd_string_view_t input) {
+        static constexpr auto tag = hn::Full128<uint8_t>{};
+
+        uint8_t const * data = reinterpret_cast<uint8_t const *>(input.data());
+        auto const bytes = hn::LoadU(tag, data);
+        auto const equals = hn::Eq(bytes, hn::Set(tag, static_cast<uint8_t>('#')));
+
+        return hn::CountTrue(tag, equals);
+      }
+
+      uint16_t parse_and_decide_if_fit(simd_string_view_t input,
+                                       simd_span_t<uint16_t const> present_volumes) {
+        assert(present_volumes.size() <= 6);
+        size_t const line_length = problem_line_length(present_volumes.size());
+        size_t const num_lines = input.size() / line_length;
+        assert(num_lines * line_length == input.size());
+
+        static constexpr auto in_tag = hn::Full256<uint8_t>{};
+        static constexpr auto calc_tag = hn::Full128<int16_t>{};
+
+        [[maybe_unused]] static constexpr size_t in_lanes = hn::Lanes(in_tag);
+        [[maybe_unused]] static constexpr size_t calc_lanes = hn::Lanes(calc_tag);
+
+        // We need 3 bytes per present count (2 digits + space), minus 1 space for the last present.
+        size_t const num_presents = present_volumes.size();
+        size_t const num_unpacked_digit_lanes = num_presents * 3 - 1;
+        assert(in_lanes >= num_unpacked_digit_lanes);
+        assert(calc_lanes >= num_presents);
+
+        uint8_t const * HWY_RESTRICT data = reinterpret_cast<uint8_t const *>(input.data());
+        auto const present_volume = hn::LoadN(
+            calc_tag, reinterpret_cast<int16_t const *>(present_volumes.data()), num_presents);
+
+        // The mask of where digits characters are, as well as the multipliers to convert from
+        // characters to integers are the same for each line, and can be precomputed.
+
+        // The loaded "present counts" string looks like: "AA AA AA AA AA ...". So we have two
+        // digits followed by a space, i.e. 0b110 for each digit group. We need to repeat this at
+        // most (in_lanes / 3) times. Note that Highway requires an array of at least 8 elements to
+        // load a mask from.
+        static constexpr auto bytes_for_mask = std::max<size_t>(8, (in_lanes + 8 - 1) / 8);
+        static constexpr uint32_t digits_bit_mask_multiplier =
+            0b001'001'001'001'001'001'001'001'001'001;
+        static constexpr uint32_t digits_bit_mask_word = 0b011 * digits_bit_mask_multiplier;
+        HWY_ALIGN static constexpr std::array<uint8_t, bytes_for_mask> digit_char_pos_mask =
+            std::to_array<uint8_t>({
+                (digits_bit_mask_word >> 0 * 8) & 0xFF,
+                (digits_bit_mask_word >> 1 * 8) & 0xFF,
+                (digits_bit_mask_word >> 2 * 8) & 0xFF,
+                (digits_bit_mask_word >> 3 * 8) & 0xFF,
+                0,
+                0,
+                0,
+                0,
+            });
+        auto const is_digit_pos = hn::And(hn::FirstN(in_tag, num_unpacked_digit_lanes),
+                                          hn::LoadMaskBits(in_tag, digit_char_pos_mask.data()));
+
+        HWY_ALIGN static constexpr std::array<uint8_t, hn::Lanes(in_tag)> digit_value_per_lane =
+            std::to_array<uint8_t>({10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1,
+                                    10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1});
+        auto const digit_multipliers = hn::Load(
+            hn::Full256<int8_t>{}, reinterpret_cast<int8_t const *>(digit_value_per_lane.data()));
+
+        uint16_t presents_fit = 0;
+
+        for (size_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+          uint8_t const * const line_ptr = data + line_idx * line_length;
+
+          // First parse width and height.
+          uint16_t const width = (line_ptr[0] - '0') * 10 + (line_ptr[1] - '0');
+          uint16_t const height = (line_ptr[3] - '0') * 10 + (line_ptr[4] - '0');
+          uint16_t const area = width * height;
+
+          // Load characters representing all present counts. Then detect where the actual digits
+          // are, and compress them to the front of the vector.
+          auto const unpacked_chars = hn::LoadU(in_tag, line_ptr + 7);
+          auto const packed_chars = hn::Compress(unpacked_chars, is_digit_pos);
+
+          // Convert to 16-bit integers. Note that these are signed, because there's no proper
+          // unsigned 16-bit support in AVX2.
+          auto const zero_char = hn::Set(in_tag, '0');
+          auto const packed_digits = hn::Sub(packed_chars, zero_char);
+
+          hn::Vec<decltype(calc_tag)> const present_counts = hn::LowerHalf(
+              hn::SatWidenMulPairwiseAdd(hn::Full256<int16_t>{}, packed_digits, digit_multipliers));
+
+          // Now calculate the total volume required for these presents.
+          int16_t const required_volume =
+              hn::ReduceSum(calc_tag, hn::Mul(present_counts, present_volume));
+          presents_fit += (required_volume <= area) ? 1 : 0;
+        }
+
+        return presents_fit;
+      }
 
     }  // namespace HWY_NAMESPACE
   }  // namespace
@@ -45,194 +152,86 @@ HWY_AFTER_NAMESPACE();
 #ifdef HWY_ONCE
 
 namespace aoc25 {
-
   namespace {
 
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
+    uint8_t num_hash_occurences(simd_string_view_t input) {
+      HWY_EXPORT(num_hash_occurences);
+      return HWY_DYNAMIC_DISPATCH(num_hash_occurences)(input);
     }
 
-    struct present_t {
-      // NOTE: Might be even faster if all 9 bits are packed in a single uint16_t.
-      // But then we need a bunch more shifts.
-      static constexpr uint8_t side_length = 3;
-
-      present_t()
-          : data_{} {}
-
-      explicit present_t(std::span<uint8_t const, side_length> data) {
-        std::ranges::copy(data, data_.begin());
-
-        for ([[maybe_unused]] auto const & row : data_) {
-          assert((row >> side_length) == 0);  // Ensure only side_length bits are used.
-        }
-      }
-
-      uint8_t const & row(uint8_t row) const { return data_[row]; }
-
-      auto begin() const { return data_.begin(); }
-      auto end() const { return data_.end(); }
-
-      auto const & raw() const { return data_; }
-
-     private:
-      std::array<uint8_t, side_length> data_;
-    };
-
-    [[maybe_unused]] auto format_as(present_t const & obj) {
-      auto const formatted_rows =
-          std::views::iota(0u, present_t::side_length) | std::views::transform([&](uint8_t row) {
-            return fmt::format("{:c}{:0{}b}{:c}", (row == 0 ? '[' : ' '), obj.row(row),
-                               present_t::side_length,
-                               (row == (present_t::side_length - 1) ? ']' : '\n'));
-          });
-      return fmt::format("{:s}", fmt::join(formatted_rows, ""));
+    uint16_t parse_and_decide_if_fit(simd_string_view_t input,
+                                     simd_span_t<uint16_t const> present_volumes) {
+      HWY_EXPORT(parse_and_decide_if_fit);
+      return HWY_DYNAMIC_DISPATCH(parse_and_decide_if_fit)(input, present_volumes);
     }
-
-  }  // namespace
-}  // namespace aoc25
-
-namespace fmt {
-
-  template <typename Char>
-  struct range_format_kind<aoc25::present_t, Char>
-      : std::integral_constant<range_format, range_format::disabled> {};
-
-}  // namespace fmt
-
-namespace aoc25 {
-  namespace {
-
-    struct region_t {
-      uint8_t width;
-      uint8_t height;
-      std::vector<uint8_t> required_presents;
-    };
-
-    [[maybe_unused]] std::string format_as(region_t const & obj) {
-      return fmt::format("{}x{}: {}", obj.width, obj.height, obj.required_presents);
-    }
-
-    struct problem_t {
-      std::vector<present_t> presents;
-      std::vector<region_t> regions;
-    };
-
-    [[maybe_unused]] std::string format_as(problem_t const & obj) {
-      return fmt::format("{} presents:\n{}\n\n{} regions:\n{:s}", obj.presents.size(),
-                         fmt::join(obj.presents, "\n\n"), obj.regions.size(),
-                         fmt::join(obj.regions, "\n"));
-    }
-
-    problem_t parse_input(simd_string_view_t input) {
-      problem_t result;
-
-      /* TODO: This can be sped up:
-       * - For the presents, just find the last # in the file. From that value, we can calculate the
-       *   number of presents.
-       * - No need to properly parse the presents, just count number of #.
-       * - The "solution" doesn't work for the example anyway, so might as well tune the parsing to
-       *   the actual input. I.e. each region has 2 digits for both width and height, as well as for
-       *   the count per present type. I.e. the exact position of each value on a line is known.
-       * - No no need to actually parse and store the input. Just solve as we go through it.
-       */
-
-      // Each present starts with an index, followed by a colon, then present_t::side_length lines,
-      // and finally a blank line. Assume there's less than 10 presents. So we know the present's
-      // index is at most one digit. Keep reading until there's no more colon at the expected
-      // position.
-      while (input.at(1) == ':') {
-        // Skip the line (index, colon, and newline).
-        input.remove_prefix(3);
-
-        auto data = std::array<uint8_t, present_t::side_length>{};
-        for (size_t row = 0; row < present_t::side_length; ++row) {
-          for (size_t col = 0; col < present_t::side_length; ++col) {
-            // Skip over past lines + newlines.
-            char const c = input[col + (present_t::side_length + 1) * row];
-            data.at(row) |= static_cast<uint8_t>(c == '#') << col;
-          }
-        }
-        result.presents.emplace_back(data);
-
-        // Jump to the next present (3 lines of 3 characters + newline, plus one extra newline).
-        input.remove_prefix(present_t::side_length * (present_t::side_length + 1) + 1);
-      }
-
-      // All remaining lines contain info on regions and their required presents.
-      uint8_t const num_presents = result.presents.size();
-
-      while (input.size() > 1) {
-        // Line format: "WxH: p1 p2 p3 ... pN". Numbers can be up to two digits long.
-        auto & region = result.regions.emplace_back();
-
-        auto const x_pos = input.find('x');
-        region.width = (x_pos == 1) ? (input[0] - '0') : (10 * (input[0] - '0') + (input[1] - '0'));
-        input.remove_prefix(x_pos + 1);  // Skip past 'x'.
-
-        auto const colon_pos = input.find(':');
-        region.height =
-            (colon_pos == 1) ? (input[0] - '0') : (10 * (input[0] - '0') + (input[1] - '0'));
-        input.remove_prefix(colon_pos + 2);  // Skip past colon and space.
-
-        // Now parse required amounts for each present.
-        auto const parse_required = [&](char separator) {
-          auto const sep_pos = input.find(separator);
-          uint8_t const num_required =
-              (sep_pos == 1) ? (input[0] - '0') : (10 * (input[0] - '0') + (input[1] - '0'));
-          region.required_presents.push_back(num_required);
-          input.remove_prefix(sep_pos + 1);  // Skip past separator.
-        };
-
-        for (uint8_t req_remaining = num_presents; req_remaining-- > 0;) {
-          assert(input.size() > 1);
-          parse_required(req_remaining != 0 ? ' ' : '\n');
-        }
-      }
-
-      SPDLOG_DEBUG("Parsed: {}", result);
-      return result;
-    }
-
-    using present_set_t = std::vector<present_t>;
 
   }  // namespace
 
   uint64_t day_t<12>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    /* NOTE: This problem is just dumb. Apparently all regions into which the requested number of
-     * presents could possibly fit (i.e. total area of presents <= area of region) do fit. I.e.
-     * there is no need to solve the (NP-complete) problem at all (which isn't feasibly anyway).
-     *
-     * There used to be a heuristic-based solver in this file to attempt actually solving the
-     * problem, which attempt to find a best-first fit across all present rotations/mirrorings on as
-     * low- and right-most as possible position. How course it didn't work, because exactly solving
-     * the 2D bin-packing problem is NP-complete.
+    // Count number of '#' for each input. We know each present is 3x3, so it takes 5 lines to
+    // describe it.
+    auto present_volumes = simd_vector_t<uint16_t>();
+    present_volumes.reserve(6);
+
+    /* Total number of symbols per present description is:
+     * - 1 digit for index, 1 colon, 1 newline
+     * - 3 lines of 3 symbols + newline
+     * - 1 extra newline
      */
-    auto const problem = parse_input(input);
+    static constexpr size_t present_desc_length = 1 + 1 + 1 + (3 * (3 + 1)) + 1;
 
-    // Calculate area per present.
-    auto const present_areas =
-        problem.presents | std::views::transform([](auto const & present) -> uint16_t {
-          return std::accumulate(present.raw().begin(), present.raw().end(), 0u,
-                                 [](uint16_t sum, uint8_t row) {
-                                   return sum + static_cast<uint16_t>(std::popcount(row));
-                                 });
-        }) |
-        std::ranges::to<std::vector>();
+    auto are_next_lines_a_present = [&]() -> bool {
+      // If the next lines describe a present, the second character must be a colon.
+      static constexpr size_t next_present_check_offset = 1;
+      return input.at(next_present_check_offset) == ':';
+    };
 
-    // For each region, test if it definitely doesn't fit.
-    uint16_t const num_definitely_no_fit_regions = std::accumulate(
-        problem.regions.begin(), problem.regions.end(), 0u, [&](uint16_t sum, auto const & region) {
-          uint32_t const region_area = static_cast<uint32_t>(region.width) * region.height;
-          uint32_t const min_required_area =
-              std::inner_product(region.required_presents.begin(), region.required_presents.end(),
-                                 present_areas.begin(), 0u);
-          return sum + (min_required_area > region_area ? 1u : 0u);
-        });
+    while (are_next_lines_a_present()) {
+      auto const present_volume = num_hash_occurences(input);
+      present_volumes.push_back(present_volume);
+      input.remove_prefix(present_desc_length);  // Jump to the next present.
+    }
+    SPDLOG_DEBUG("Parsed present volumes: {}", present_volumes);
 
-    return problem.regions.size() - num_definitely_no_fit_regions;
+    // Now parse regions and decide whether requested presents fit the given area.
+    size_t const num_lines = aoc25::count(input.as_span(), '\n');
+    size_t const line_length = problem_line_length(present_volumes.size());
+    size_t const expected_input_length = num_lines * line_length;
+
+    SPDLOG_DEBUG("# lines: {}, chars per line: {}, # expected chars: {}, input size: {}", num_lines,
+                 line_length, expected_input_length, input.size());
+
+    if (expected_input_length != input.size()) {
+      // Exit on mismatch, i.e. for example. No big deal, since the code can't solve it anyway.
+      throw std::invalid_argument(fmt::format(
+          "Unsupported input format: expected {} lines of {} chars, got {} (!= {}) total chars",
+          num_lines, line_length, input.size(), expected_input_length));
+    }
+
+    // Process in chunks of lines in parallel,
+    static constexpr size_t num_threads = 8;
+    size_t const lines_per_chunk = (num_lines + num_threads - 1) / num_threads;
+    [[maybe_unused]] size_t const num_chunks = (num_lines + lines_per_chunk - 1) / lines_per_chunk;
+    assert(num_chunks == num_threads);
+
+    uint64_t result = 0;
+
+#  pragma omp parallel for reduction(+ : result) num_threads(num_threads)
+    for (size_t chunk_idx = 0; chunk_idx < num_chunks; ++chunk_idx) {
+      size_t const line_start = chunk_idx * lines_per_chunk;
+      size_t const line_end = std::min<size_t>(line_start + lines_per_chunk, num_lines);
+      size_t const chunk_size = line_end - line_start;
+
+      simd_string_view_t const chunk_input =
+          input.substr(line_start * line_length, chunk_size * line_length);
+      auto const num_fits_in_chunk = parse_and_decide_if_fit(chunk_input, present_volumes);
+      SPDLOG_DEBUG("Chunk {:2d} (lines {}-{}): {} regions fit", chunk_idx, line_start, line_end - 1,
+                   num_fits_in_chunk);
+
+      result += num_fits_in_chunk;
+    }
+
+    return result;
   }
 
 }  // namespace aoc25

@@ -311,7 +311,7 @@ namespace aoc25 {
         }
       }();
 
-      SPDLOG_DEBUG("Converting input '{}' with mask {:#016b}", input, mask);
+      SPDLOG_TRACE("Converting input '{}' with mask {:#016b}", input, mask);
 
       // Load input, using the mask.
       // NOTE: This load is never out of bounds, because we take an simd_string_view_t as input,
@@ -332,7 +332,7 @@ namespace aoc25 {
       HWY_ALIGN std::array<uint16_t, hn::MaxLanes(tag_8x16)> base10_words;
       hn::Store(base10_16bit, tag_8x16, base10_words.data());
 
-      SPDLOG_DEBUG("Parsed base-10 words: {::d}", base10_words);
+      SPDLOG_TRACE("Parsed base-10 words: {::d}", base10_words);
 
       // Maximum 16-bit unsigned integer is 65 535 (5 digits)
       uint16_t result = base10_words[2];  // Due to bit casting, result is at index 2.
@@ -342,7 +342,7 @@ namespace aoc25 {
         auto const high_part = base10_words[0];  // Again, result in odd place due to bit casting.
         result = result + 10'000U * high_part;
 
-        SPDLOG_DEBUG("Inside the high part (high part: {}, prev result: {}, result: {})", high_part,
+        SPDLOG_TRACE("Inside the high part (high part: {}, prev result: {}, result: {})", high_part,
                      prev_result, result);
 
         if ((high_part > 6) || (result < prev_result)) [[unlikely]] {  // Check for overflow.
@@ -369,7 +369,7 @@ namespace aoc25 {
       size_t input_pos = 0;
 
       auto const process_matches = [&](uint32_t match_bits) -> bool {
-        SPDLOG_DEBUG("Found {} matches at input position {}", std::popcount(match_bits), input_pos);
+        SPDLOG_TRACE("Found {} matches at input position {}", std::popcount(match_bits), input_pos);
 
         while (match_bits != 0) {
           uint8_t const match_offset = std::countr_zero(match_bits);
@@ -393,14 +393,14 @@ namespace aoc25 {
         return true;
       };
 
-      SPDLOG_DEBUG("Searching for {:?} in {} bytes", splitter, input.size());
+      SPDLOG_TRACE("Searching for {:?} in {} bytes", splitter, input.size());
 
       // Process initial unaligned bytes.
       size_t const unaligned_bytes = reinterpret_cast<uintptr_t>(data) % lanes;
 
       if (unaligned_bytes != 0) {
         size_t const initial_bytes = std::min(lanes - unaligned_bytes, input.size());
-        SPDLOG_DEBUG("Processing {} unaligned bytes", initial_bytes);
+        SPDLOG_TRACE("Processing {} unaligned bytes", initial_bytes);
 
         auto const chunk = hn::LoadU(tag, data);
         auto const eq = hn::Eq(chunk, splitters);
@@ -414,14 +414,14 @@ namespace aoc25 {
         }
 
         input_pos += initial_bytes;  // Update input position for aligned loads afterwards.
-        SPDLOG_DEBUG("Processed {} unaligned bytes", initial_bytes);
+        SPDLOG_TRACE("Processed {} unaligned bytes", initial_bytes);
       }
 
       // Process inputs in chunks of 'lanes' bytes.
       [[maybe_unused]] size_t const num_chunks = (input.size() - input_pos) / lanes;
       if (num_chunks > 0) {
         assert((reinterpret_cast<uintptr_t>(data) + input_pos) % lanes == 0);
-        SPDLOG_DEBUG("Processing {} bytes ({} chunks)", num_chunks * lanes, num_chunks);
+        SPDLOG_TRACE("Processing {} bytes ({} chunks)", num_chunks * lanes, num_chunks);
       }
 
       for (; input_pos + lanes <= input.size(); input_pos += lanes) {
@@ -440,7 +440,7 @@ namespace aoc25 {
       // We also know that the input is padded, so no risk of reading out of bounds.
       if (input_pos < input.size()) {
         size_t const remaining_bytes = input.size() - input_pos;
-        SPDLOG_DEBUG("Processing {} remaining bytes", remaining_bytes);
+        SPDLOG_TRACE("Processing {} remaining bytes", remaining_bytes);
         assert((reinterpret_cast<uintptr_t>(data) + input_pos) % lanes == 0);
 
         auto const chunk = hn::Load(tag, data + input_pos);

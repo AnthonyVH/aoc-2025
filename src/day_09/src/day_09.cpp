@@ -17,43 +17,10 @@
 #include <ranges>
 #include <type_traits>
 #include <utility>
-
-#undef HWY_TARGET_INCLUDE
-#define HWY_TARGET_INCLUDE "src/day_09.cpp"
-
-// clang-format off
-#include <hwy/foreach_target.h>
-// clang-format on
-
-#include <hwy/highway.h>
-
-HWY_BEFORE_NAMESPACE();
+#include <vector>
 
 namespace aoc25 {
   namespace {
-    namespace HWY_NAMESPACE {
-
-      namespace hn = hwy::HWY_NAMESPACE;
-
-      [[maybe_unused]] void compiler_stop_complaining() {}
-
-    }  // namespace HWY_NAMESPACE
-  }  // namespace
-}  // namespace aoc25
-
-HWY_AFTER_NAMESPACE();
-
-#ifdef HWY_ONCE
-
-namespace aoc25 {
-
-  namespace {
-
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
-    }
 
     struct point_t {
       int32_t x;
@@ -113,8 +80,6 @@ namespace aoc25 {
       std::vector<edges_per_coord_t> result;
       std::unordered_map<uint32_t, uint16_t> coord_to_idx;
 
-      point_t prev_point = points.back();
-
       auto const to_array = [](uint32_t lhs, uint32_t rhs) -> std::array<uint32_t, 2> {
         auto const [a, b] = std::minmax(lhs, rhs);
         return {a, b};
@@ -132,15 +97,24 @@ namespace aoc25 {
         return result.at(it->second).edges;
       };
 
-      for (auto const & point : points) {
-        if (prev_point.x == point.x) {  // Vertical edge.
-          auto & edges = get_edges_vector(point.x);
-          edges.emplace_back(to_array(prev_point.y, point.y));
-        } else {
-          // No need to store horizontal edges.
-        }
+      auto const add_edge = [&](point_t const & point_a, point_t const & point_b) {
+        assert(point_a.x == point_b.x);  // Vertical edges only.
+        auto & edges = get_edges_vector(point_a.x);
+        edges.emplace_back(to_array(point_a.y, point_b.y));
+      };
 
-        prev_point = point;
+      size_t idx = 0;
+
+      if (points[0].y == points[1].y) {
+        // First edge is horizontal, so offset indices by 1, and handle wrap-around edge.
+        idx = 1;
+        add_edge(points.back(), points[0]);
+      }
+
+      for (; idx < points.size() - 1; idx += 2) {
+        auto const & point_a = points[idx + 0];
+        auto const & point_b = points[idx + 1];
+        add_edge(point_a, point_b);
       }
 
       // Sort by coordinate.
@@ -477,43 +451,235 @@ namespace aoc25 {
       }));
     }
 
+    [[maybe_unused]] int64_t polygon_signed_area(std::span<point_t const> points) {
+      int64_t area = 0;
+
+      auto const signed_area = [](point_t const & a, point_t const & b) {
+        // Shoelace trapezoid formula simplified for horizontal edges.
+        assert(a.y == b.y);  // Only support horizontal edges.
+        return (static_cast<int64_t>(a.x) - b.x) * a.y;
+      };
+
+      size_t const num_points = points.size();
+      size_t idx = 0;
+
+      // The edges always alternate between horizontal and vertical. When using the trapezoid
+      // formulate in the shoelace algorithm, vertical edges don't contribute to the area. So first
+      // find out where the first horizontal edge is and only take those into account.
+      if (points[0].y != points[1].y) {
+        // First edge is vertical, so offset indices by 1, and add "wrap-around" edge manually.
+        idx = 1;
+        area += signed_area(points.back(), points[0]);
+      }
+
+      for (; idx < num_points - 1; idx += 2) {
+        assert(idx + 1 < num_points);
+        auto const & point_a = points[idx + 0];
+        auto const & point_b = points[idx + 1];
+        area += signed_area(point_a, point_b);
+      }
+
+      SPDLOG_DEBUG("Polygon signed area: {}", area);
+      assert(area != 0);  // Assumed no degenerate polygons.
+      return area;
+    }
+
+    bool is_left_turn(point_t const & a, point_t const & b, point_t const & c) {
+      // Vector AB.
+      int64_t const ab_x = static_cast<int64_t>(b.x) - a.x;
+      int64_t const ab_y = static_cast<int64_t>(b.y) - a.y;
+
+      // Vector AC.
+      int64_t const ac_x = static_cast<int64_t>(c.x) - a.x;
+      int64_t const ac_y = static_cast<int64_t>(c.y) - a.y;
+
+      auto const cross_product = (ab_x * ac_y) - (ab_y * ac_x);
+      assert(cross_product != 0);  // Assumed that there's no collinear points.
+
+      bool const turns_left = cross_product > 0;
+      SPDLOG_TRACE("Points {}, {}, {} make a {} turn (cross product {})", a, b, c,
+                   turns_left ? "left" : "right", cross_product);
+
+      return turns_left;
+    }
+
+    std::vector<point_t> convex_hull(std::span<point_t const> polygon) {
+      // Points must be in clockwise order.
+      assert(polygon_signed_area(polygon) < 0);
+
+      // First point must be extremal in x.
+      assert(polygon.front().x == std::ranges::min_element(polygon, {}, &point_t::x)->x);
+
+      std::vector<point_t> hull;
+      hull.reserve(polygon.size());
+
+      hull.push_back(polygon[0]);
+      hull.push_back(polygon[1]);
+
+      for (size_t idx = 2; idx < polygon.size(); ++idx) {
+        auto const & point = polygon[idx];
+
+        while (hull.size() >= 2) {
+          auto const hull_size = hull.size();
+          auto const & point_a = hull[hull_size - 2];
+          auto const & point_b = hull[hull_size - 1];
+
+          // Check if the corner formed by the last three points is going left. If so, it's going
+          // counter-clockwise (i.e. concave) and we need to remove the last point from the hull.
+          if (is_left_turn(point_a, point_b, point)) {
+            SPDLOG_TRACE("  Hull is concave at points [{}, {}, {}], removing {} from hull.",
+                         point_a, point_b, point, point_b);
+            hull.pop_back();
+          } else {
+            break;  // Right turn or collinear, keep last point.
+          }
+        }
+
+        hull.push_back(point);
+      }
+
+      SPDLOG_DEBUG("Calculated convex hull with {} / {} points", hull.size(), polygon.size());
+      return hull;
+    }
+
+    /** A list of points that are either contained within this struct, or reference
+     * a span of external points.
+     */
+    struct chain_t {
+      explicit chain_t(std::span<point_t const> span)
+          : points_{}, span_{span} {}
+
+      chain_t(std::span<point_t const> first, std::span<point_t const> second)
+          : points_{}, span_{} {
+        points_.reserve(first.size() + second.size());
+        points_.insert(points_.end(), first.begin(), first.end());
+        points_.insert(points_.end(), second.begin(), second.end());
+        span_ = points_;
+      }
+
+      auto begin() const { return span_.begin(); }
+      auto end() const { return span_.end(); }
+
+      size_t size() const { return span_.size(); }
+
+     private:
+      std::vector<point_t> points_;
+      std::span<point_t const> span_;
+    };
+
   }  // namespace
 
   uint64_t day_t<9>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+    // NOTE: Also tried this with SoA and SIMD, but that actually didn't improve performance. Didn't
+    // look into it further because this scalar version is already very fast.
+    std::vector<point_t> points = parse_input(input);
+    assert(points.size() >= 4);
 
-    int64_t max_area = 0;
-    size_t num_points = points.size();
+    /* The largest possible rectangle is guaranteed to be between two points on the convex hull of
+     * the polygon. So first calculate the convex hull (in O(N)). Then split the hull into 4
+     * quadrants (top-left, top-right, bottom-left, bottom-right) in O(N). Finally brute-force check
+     * all rectangles between points in opposite quadrants (top-left with bottom-right, top-right
+     * with bottom-left) in O(N^2). The largest possible rectangle is one of the two found this way.
+     */
 
-    for (size_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
-      auto const & point_a = points.at(idx_a);
+    /* The complex hull algorithm needs to start at an extremal point, so find one first. Then
+     * rotate it to the beginning, such that we don't need to use modulo arithmetic to iterate the
+     * list of points.
+     *
+     * However, the convex hull algorithm also needs the points to be in clockwise order. Given that
+     * the first point in the list is extremal, the turn direction between two edges indicates
+     * whether the points are in clockwise or counter-clockwise order. A left turn indicates
+     * counter-clockwise order, while a right turn indicates clockwise order.
+     *
+     * This means, that if it turns out that the points are in counter-clockwise order, we need to
+     * reverse the order of the points. However, if we do that after rotating the extremal point to
+     * the front, the extremal point then ends up at the end of the list, and we would need another
+     * rotation. So, in that case, we instead rotate the extremal point to the back of the list, and
+     * then reverse the entire list. This way, the extremal point ends up at the front as desired.
+     */
+    auto const min_x_it = std::ranges::min_element(points, {}, &point_t::x);
+    size_t const min_x_idx = std::ranges::distance(points.begin(), min_x_it);
 
-      for (size_t idx_b = idx_a + 1; idx_b < num_points; ++idx_b) {
-        auto const & point_b = points.at(idx_b);
-        int64_t const area = calc_area(point_a, point_b);
-        SPDLOG_DEBUG("Area between {} and {}: {}", point_a, point_b, area);
-        max_area = std::max(max_area, area);
-      }
+    auto const are_points_cw =
+        !is_left_turn(points[(min_x_idx + points.size() - 1) % points.size()], points[min_x_idx],
+                      points[(min_x_idx + 1) % points.size()]);
+
+    if (are_points_cw) {  // Simply rotate to put min x at front.
+      std::ranges::rotate(points, min_x_it);
+    } else {  // Rotate to put min x at back, then reverse entire list.
+      SPDLOG_DEBUG("Reversing point order to be clockwise.");
+      std::ranges::rotate(points, min_x_it + 1);
+      std::ranges::reverse(points);
+      assert(polygon_signed_area(points) < 0);
     }
+
+    // Calculate the convex hull.
+    auto const hull = convex_hull(points);
+
+    // Find chains between extremal points.
+    auto const x_extrema_it = std::ranges::minmax_element(hull, {}, &point_t::x);
+    auto const y_extrema_it = std::ranges::minmax_element(hull, {}, &point_t::y);
+    size_t const x_min_pos = std::ranges::distance(hull.begin(), x_extrema_it.min);
+    size_t const x_max_pos = std::ranges::distance(hull.begin(), x_extrema_it.max);
+    size_t const y_min_pos = std::ranges::distance(hull.begin(), y_extrema_it.min);
+    size_t const y_max_pos = std::ranges::distance(hull.begin(), y_extrema_it.max);
+
+    // Create chains of points between extremal points. One of these chains crosses the 0 index, so
+    // to avoid having to do modulo arithmetic, we create a new vector to hold points on that chain.
+    auto const create_chain = [&](size_t start_pos, size_t end_pos) -> chain_t {
+      if (start_pos < end_pos) {
+        return chain_t(std::span<point_t const>(hull).subspan(start_pos, end_pos - start_pos + 1));
+      } else {
+        return chain_t(std::span<point_t const>(hull).subspan(start_pos, hull.size() - start_pos),
+                       std::span<point_t const>(hull).subspan(0, end_pos + 1));
+      }
+    };
+
+    auto const top_left_chain = create_chain(x_min_pos, y_max_pos);
+    auto const top_right_chain = create_chain(y_max_pos, x_max_pos);
+    auto const bottom_right_chain = create_chain(x_max_pos, y_min_pos);
+    auto const bottom_left_chain = create_chain(y_min_pos, x_min_pos);
+
+    // The largest rectangle must be between points in opposite chains. Brute-force check all
+    // rectangles between points in these opposite chains, and then select the largest one.
+    auto const brute_force_max_rectangle = [](chain_t const & chain_a,
+                                              chain_t const & chain_b) -> int64_t {
+      SPDLOG_DEBUG("Brute-forcing {} rectangles between chains of size {} and {}",
+                   chain_a.size() * chain_b.size(), chain_a.size(), chain_b.size());
+
+      int64_t max_area = 0;
+
+      for (auto const & point_a : chain_a) {
+        for (auto const & point_b : chain_b) {
+          int64_t const area = calc_area(point_a, point_b);
+          SPDLOG_TRACE("Area between {} and {}: {}", point_a, point_b, area);
+          max_area = std::max(max_area, area);
+        }
+      }
+
+      return max_area;
+    };
+
+    auto const max_area_top_left_bottom_right =
+        brute_force_max_rectangle(top_left_chain, bottom_right_chain);
+    auto const max_area_top_right_bottom_left =
+        brute_force_max_rectangle(top_right_chain, bottom_left_chain);
+    auto const max_area = std::max(max_area_top_left_bottom_right, max_area_top_right_bottom_left);
+    SPDLOG_DEBUG("Checked {} areas", (top_left_chain.size() * bottom_right_chain.size()) +
+                                         (top_right_chain.size() * bottom_left_chain.size()));
 
     return max_area;
   }
-
-  /* TODO: The proper way for part 1 in O(N log N):
-   * - Figure out direction of polygon (clockwise / counter-clockwise).
-   * - Calculate convex hull (using e.g. Andrew's monotone chain algorithm).
-   * - Use SMAWK to find the largest rectangle formed by any two points on the hull.
-   */
 
   uint64_t day_t<9>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
     std::vector<point_t> points = parse_input(input);
 
     // Create list of vertical edges for each x-coordinate.
     auto const vertical_edges = build_vertical_edges(points);
-    SPDLOG_DEBUG("Vertical edges: {}", vertical_edges);
+    SPDLOG_DEBUG("Vertical edges: {::s}", vertical_edges);
 
     auto const vertical_ranges = edges_to_ranges(vertical_edges);
-    SPDLOG_DEBUG("Vertical ranges: {}", vertical_ranges);
+    SPDLOG_DEBUG("Vertical ranges: {::s}", vertical_ranges);
 
     /* For each x-coordinate i:
      *
@@ -609,5 +775,3 @@ namespace aoc25 {
   }
 
 }  // namespace aoc25
-
-#endif  // HWY_ONCE

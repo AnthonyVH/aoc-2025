@@ -42,34 +42,45 @@ namespace {
     unsigned total;
   };
 
+  std::string success_log_string(bool success) {
+    return fmt::format("{}", success ? fmt::styled("PASS", fmt::fg(fmt::terminal_color::green))
+                                     : fmt::styled("FAIL", fmt::fg(fmt::terminal_color::red)));
+  }
+
   template <size_t Day, size_t Part, size_t Version, class StringLike>
   bool verify_day_part_version(std::string_view msg_prefix,
                                StringLike const & input,
                                std::optional<size_t> example_number,
                                std::string_view expected) {
     static constexpr bool run_version = Version != static_cast<size_t>(-1);
+    auto const log_prefix = fmt::format(
+        "[{}{}{}] ", msg_prefix, run_version ? fmt::format(" v{:d}", Version) : std::string_view{},
+        example_number ? fmt::format(" - example {}", *example_number) : std::string_view{});
 
-    auto const actual = [&] {
-      // Internal state might change when calling solve, so always recreate the day_t object.
-      day_t<Day> day{};
-      static constexpr auto tag = part<Part>;
+    try {
+      auto const actual = [&] {
+        // Internal state might change when calling solve, so always recreate the day_t object.
+        day_t<Day> day{};
+        static constexpr auto tag = part<Part>;
 
-      if constexpr (run_version) {
-        return day.solve(tag, version<Version>, input);
-      } else {
-        return day.solve(tag, input);
-      }
-    }();
-    auto const actual_str = fmt::format("{}", actual);
+        if constexpr (run_version) {
+          return day.solve(tag, version<Version>, input);
+        } else {
+          return day.solve(tag, input);
+        }
+      }();
+      auto const actual_str = fmt::format("{}", actual);
 
-    spdlog::info(
-        "[{}{}{}] {} (actual: {}, expected: {})", msg_prefix,
-        run_version ? fmt::format(" v{:d}", Version) : std::string_view{},
-        example_number ? fmt::format(" - example {}", *example_number) : std::string_view{},
-        (actual_str == expected) ? fmt::styled("PASS", fmt::fg(fmt::terminal_color::green))
-                                 : fmt::styled("FAIL", fmt::fg(fmt::terminal_color::red)),
-        actual_str, expected);
-    return actual_str == expected;
+      spdlog::info("{}{} (actual: {}, expected: {})", log_prefix,
+                   success_log_string(actual_str == expected), actual_str, expected);
+      return actual_str == expected;
+    } catch (std::exception const & ex) {
+      spdlog::error("{}{} (exception: \"{}\")", log_prefix, success_log_string(false), ex.what());
+    } catch (...) {
+      spdlog::error("{}{} (unknown exception)", log_prefix, success_log_string(false));
+    }
+
+    return false;
   }
 
   template <size_t Day, size_t Part>

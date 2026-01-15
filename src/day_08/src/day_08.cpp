@@ -4,11 +4,8 @@
 #include "aoc25/simd.hpp"
 #include "aoc25/string.hpp"
 
-#include <CGAL/Delaunay_triangulation_3.h>
-#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-#include <CGAL/Triangulation_vertex_base_with_info_3.h>
-#include <fmt/ostream.h>
 #include <fmt/std.h>
+#include <hwy/base.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -17,6 +14,112 @@
 #include <limits>
 #include <numeric>
 #include <ranges>
+#include <utility>
+
+namespace aoc25 {
+  namespace {
+
+    /* Note: We use doubles instead of uint32_t here, because the result of a distance calculation
+     * requires more than 32 bits. Hence we need at minimum a 64-bit result. However, there's no
+     * proper 64-bit integer SIMD multiplication, so this must be done in floating point. And
+     * converting from integer to floating point is expensive. Plus if we start with 32-bit values
+     * we also have to expand the lane size, which means going from SSE to AVX2, which also costs a
+     * lot of time. So instead we just pay the extra memory cost and store coordinates as double.
+     */
+    struct point_t {
+      double x;
+      double y;
+      double z;
+
+      [[maybe_unused]] friend auto operator<(point_t const & lhs, point_t const & rhs) {
+        return std::tie(lhs.x, lhs.y, lhs.z) < std::tie(rhs.x, rhs.y, rhs.z);
+      }
+    };
+
+    [[maybe_unused]] std::string format_as(point_t const & obj) {
+      return fmt::format("<x: {}, y: {}, z: {}>", obj.x, obj.y, obj.z);
+    }
+
+    /* Structure of arrays to allow SIMD calculations on the points. */
+    struct points_t {
+      points_t()
+          : points_t(0) {}
+
+      explicit points_t(size_t reserve_size) {
+        x_.reserve(reserve_size);
+        y_.reserve(reserve_size);
+        z_.reserve(reserve_size);
+      }
+
+      size_t size() const { return x_.size(); }
+      bool empty() const { return x_.empty(); }
+
+      void push_back(double x, double y, double z) {
+        x_.push_back(x);
+        y_.push_back(y);
+        z_.push_back(z);
+      }
+
+      double & x(size_t index) {
+        assert(index < x_.size());
+        return x_[index];
+      }
+
+      double x(size_t index) const {
+        assert(index < x_.size());
+        return x_[index];
+      }
+
+      double & y(size_t index) {
+        assert(index < y_.size());
+        return y_[index];
+      }
+      double y(size_t index) const {
+        assert(index < y_.size());
+        return y_[index];
+      }
+      double & z(size_t index) {
+        assert(index < z_.size());
+        return z_[index];
+      }
+      double z(size_t index) const {
+        assert(index < z_.size());
+        return z_[index];
+      }
+
+      simd_span_t<double const> x() const { return x_; }
+      simd_span_t<double const> y() const { return y_; }
+      simd_span_t<double const> z() const { return z_; }
+
+      void erase(size_t index) {
+        assert(index < x_.size());
+
+        using std::swap;
+        swap(x_.back(), x_[index]);
+        swap(y_.back(), y_[index]);
+        swap(z_.back(), z_[index]);
+
+        x_.pop_back();
+        y_.pop_back();
+        z_.pop_back();
+      }
+
+     private:
+      simd_vector_t<double> x_;
+      simd_vector_t<double> y_;
+      simd_vector_t<double> z_;
+    };
+
+    [[maybe_unused]] std::string format_as(points_t const & obj) {
+      return fmt::format(
+          "{::s}",
+          std::views::zip(obj.x(), obj.y(), obj.z()) | std::views::transform([](auto const & e) {
+            return fmt::format("({}, {}, {})", std::get<0>(e), std::get<1>(e), std::get<2>(e));
+          }));
+    }
+
+  }  // namespace
+}  // namespace aoc25
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "src/day_08.cpp"
@@ -25,6 +128,7 @@
 #include <hwy/foreach_target.h>
 // clang-format on
 
+#include <hwy/cache_control.h>
 #include <hwy/highway.h>
 
 HWY_BEFORE_NAMESPACE();
@@ -35,7 +139,175 @@ namespace aoc25 {
 
       namespace hn = hwy::HWY_NAMESPACE;
 
-      [[maybe_unused]] void compiler_stop_complaining() {}
+      void calculate_distances(point_t const & first_point,
+                               simd_span_t<double const> points_x,
+                               simd_span_t<double const> points_y,
+                               simd_span_t<double const> points_z,
+                               simd_span_t<double> distances_out) {
+        static constexpr auto tag = hn::ScalableTag<double>{};
+        static constexpr size_t lanes = hn::Lanes(tag);
+
+        assert(points_x.size() == points_y.size());
+        assert(points_x.size() == points_z.size());
+        assert(points_x.size() == distances_out.size());
+
+        auto const x_first = hn::Set(tag, first_point.x);
+        auto const y_first = hn::Set(tag, first_point.y);
+        auto const z_first = hn::Set(tag, first_point.z);
+
+        auto const * HWY_RESTRICT src_x = reinterpret_cast<double const *>(points_x.data());
+        auto const * HWY_RESTRICT src_y = reinterpret_cast<double const *>(points_y.data());
+        auto const * HWY_RESTRICT src_z = reinterpret_cast<double const *>(points_z.data());
+
+        size_t const num_points = points_x.size();
+        size_t pos = 0;
+
+        auto const calculate_sum = [&](auto const & x_chunk, auto const & y_chunk,
+                                       auto const & z_chunk) {
+          auto const dx = hn::Sub(x_chunk, x_first);
+          auto const dy = hn::Sub(y_chunk, y_first);
+          auto const dz = hn::Sub(z_chunk, z_first);
+
+          auto sum = hn::Mul(dx, dx);
+          sum = hn::MulAdd(dy, dy, sum);
+          sum = hn::MulAdd(dz, dz, sum);
+
+          return sum;
+        };
+
+        for (; pos + lanes <= num_points; pos += lanes) {
+          auto const x_chunk = hn::LoadU(tag, src_x + pos);
+          auto const y_chunk = hn::LoadU(tag, src_y + pos);
+          auto const z_chunk = hn::LoadU(tag, src_z + pos);
+
+          auto const sum = calculate_sum(x_chunk, y_chunk, z_chunk);
+          hn::Store(sum, tag, distances_out.data() + pos);
+        }
+
+        if (pos < num_points) {  // Handle last partial chunk.
+          size_t const lanes_remaining = num_points - pos;
+          assert(pos + lanes_remaining == num_points);
+
+          auto const x_chunk = hn::LoadN(tag, src_x + pos, lanes_remaining);
+          auto const y_chunk = hn::LoadN(tag, src_y + pos, lanes_remaining);
+          auto const z_chunk = hn::LoadN(tag, src_z + pos, lanes_remaining);
+
+          auto const sum = calculate_sum(x_chunk, y_chunk, z_chunk);
+          hn::StoreN(sum, tag, distances_out.data() + pos, lanes_remaining);
+        }
+      }
+
+      void update_distances(simd_span_t<double> prev_dist,
+                            simd_span_t<uint32_t> prev_target_idx,
+                            simd_span_t<double const> new_dist,
+                            uint32_t new_target_idx) {
+        static constexpr auto dist_tag = hn::ScalableTag<double>{};
+        static constexpr size_t lanes = hn::Lanes(dist_tag);
+        static constexpr auto idx_tag = hn::FixedTag<uint32_t, lanes>{};
+
+        // Update all entries in prev_dist and prev_target_idx if the new distance is smaller.
+        assert(prev_target_idx.size() == prev_dist.size());
+        assert(prev_target_idx.size() == new_dist.size());
+
+        auto const target_idx = hn::Set(idx_tag, new_target_idx);
+
+        size_t pos = 0;
+
+        // Ensure inputs are aligned.
+        assert(reinterpret_cast<uintptr_t>(new_dist.data()) % lanes == 0);
+        assert(reinterpret_cast<uintptr_t>(prev_dist.data()) % lanes == 0);
+
+        for (; pos + lanes <= new_dist.size(); pos += lanes) {
+          // Note: Loading 2 chunks at a time, combining the masks, and then processing a
+          // double-width chunk of indices is not faster.
+          auto const new_chunk = hn::Load(dist_tag, new_dist.data() + pos);
+          auto const prev_chunk = hn::Load(dist_tag, prev_dist.data() + pos);
+          auto const use_new = hn::Lt(new_chunk, prev_chunk);
+
+          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_dist.data() + pos);
+          hn::BlendedStore(target_idx, hn::DemoteMaskTo(idx_tag, dist_tag, use_new), idx_tag,
+                           prev_target_idx.data() + pos);
+        }
+
+        if (pos < new_dist.size()) {  // Handle last partial chunk.
+          size_t const lanes_remaining = new_dist.size() - pos;
+          assert(pos + lanes_remaining == new_dist.size());
+
+          auto const new_chunk = hn::LoadN(dist_tag, new_dist.data() + pos, lanes_remaining);
+          auto const prev_chunk = hn::LoadN(dist_tag, prev_dist.data() + pos, lanes_remaining);
+          auto const use_new = hn::Lt(new_chunk, prev_chunk);
+
+          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_dist.data() + pos);
+
+          hn::BlendedStore(target_idx, hn::DemoteMaskTo(idx_tag, dist_tag, use_new), idx_tag,
+                           prev_target_idx.data() + pos);
+        }
+      }
+
+      // Note: See call-site for an explanation why this single template argument is used.
+      template <class SiftDownArgs>
+      void sift_down_with_aux(SiftDownArgs args) {
+        using key_t = std::remove_cvref_t<decltype(args.keys.front())>;
+        using value_t = std::remove_cvref_t<decltype(args.values.front())>;
+
+        static constexpr size_t branching_factor = SiftDownArgs::branching_factor;
+        static constexpr auto tag = hn::FixedTag<key_t, branching_factor>{};
+
+        static_assert(std::is_arithmetic_v<key_t>);
+        static_assert((branching_factor == 2) || (branching_factor == 4),
+                      "Comparison code requires branching factor of 2 or 4");
+
+        size_t const size = args.keys.size();
+        key_t * HWY_RESTRICT key_ptr = args.keys.data();
+        value_t * HWY_RESTRICT value_ptr = args.values.data();
+        size_t pos = args.pos;
+
+        while (true) {
+          size_t const first_child = branching_factor * pos + 1;
+          size_t const last_child = first_child + branching_factor - 1;
+
+          if (first_child >= size) {
+            break;  // No children exist.
+          }
+
+          size_t best_child = 0xDEAD'BEEF;
+
+          if (last_child < size) {  // Handle all children using SIMD.
+            auto const child_keys = hn::LoadU(tag, key_ptr + first_child);
+
+            // Prefetch children of first current child.
+            hwy::Prefetch(key_ptr + branching_factor * first_child + 1);
+
+            // Calculate max such that each lane contains the max key among all children.
+            auto const max = hn::MaxOfLanes(tag, child_keys);
+
+            if (hn::GetLane(max) <= key_ptr[pos]) {
+              break;
+            }
+
+            // Find which child has the max key.
+            auto const is_max = hn::Eq(child_keys, max);
+            best_child = first_child + std::countr_zero(hn::BitsFromMask(tag, is_max));
+          } else {  // Fall back to scalar code for the last incomplete group.
+            best_child = first_child;
+
+            for (size_t child = first_child + 1; child < size; ++child) {
+              best_child = (key_ptr[child] > key_ptr[best_child]) ? child : best_child;
+            }
+
+            if (key_ptr[best_child] <= key_ptr[pos]) {
+              break;
+            }
+          }
+
+          // Keep key and value position synchronized.
+          using std::swap;
+          swap(key_ptr[pos], key_ptr[best_child]);
+          swap(value_ptr[pos], value_ptr[best_child]);
+
+          pos = best_child;
+        }
+      }
 
     }  // namespace HWY_NAMESPACE
   }  // namespace
@@ -49,58 +321,44 @@ namespace aoc25 {
 
   namespace {
 
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
+    void calculate_distances(point_t const & first_point,
+                             simd_span_t<double const> points_x,
+                             simd_span_t<double const> points_y,
+                             simd_span_t<double const> points_z,
+                             simd_span_t<double> distances_out) {
+      HWY_EXPORT(calculate_distances);
+      return HWY_DYNAMIC_DISPATCH(calculate_distances)(first_point, points_x, points_y, points_z,
+                                                       distances_out);
     }
 
-    struct point_t {
-      uint32_t x;
-      uint32_t y;
-      uint32_t z;
+    void update_distances(simd_span_t<double> prev_distances,
+                          simd_span_t<uint32_t> prev_target_idx,
+                          simd_span_t<double const> new_distances,
+                          uint32_t new_target_idx) {
+      HWY_EXPORT(update_distances);
+      return HWY_DYNAMIC_DISPATCH(update_distances)(prev_distances, prev_target_idx, new_distances,
+                                                    new_target_idx);
+    }
 
-      [[maybe_unused]] friend auto operator<(point_t const & lhs, point_t const & rhs) {
-        return std::tie(lhs.x, lhs.y, lhs.z) < std::tie(rhs.x, rhs.y, rhs.z);
-      }
+    /* Google Highway does not support creating dispatch tables to functions with more than one
+     * template argument. Hence we cheat by bundling all template arguments into a single struct,
+     * and unpacking it again inside the function that gets dispatched to.
+     */
+    template <size_t BranchingFactor, class Key, class Value>
+    struct sift_down_with_aux_args_t {
+      static constexpr size_t branching_factor = BranchingFactor;
+
+      simd_span_t<Key> keys;
+      std::span<Value> values;
+      size_t pos;
     };
 
-    [[maybe_unused]] std::string format_as(point_t const & obj) {
-      return fmt::format("<x: {}, y: {}, z: {}>", obj.x, obj.y, obj.z);
-    }
-
-    struct distance_t {
-      uint64_t distance;
-      uint16_t idx_a;
-      uint16_t idx_b;
-
-      [[maybe_unused]] friend auto operator<(distance_t const & lhs, distance_t const & rhs) {
-        return lhs.distance < rhs.distance;  // Don't care about indices.
-      }
-
-      [[maybe_unused]] friend auto operator>(distance_t const & lhs, distance_t const & rhs) {
-        return lhs.distance > rhs.distance;  // Don't care about indices.
-      }
-    };
-
-    [[maybe_unused]] std::string format_as(distance_t const & obj) {
-      return fmt::format("<distance: {}, idx_a: {}, idx_b: {}>", obj.distance, obj.idx_a,
-                         obj.idx_b);
-    }
-
-    [[maybe_unused]] distance_t dist(uint16_t idx_a,
-                                     uint16_t idx_b,
-                                     point_t const & lhs,
-                                     point_t const & rhs) {
-      int64_t const dx = static_cast<int64_t>(lhs.x) - static_cast<int64_t>(rhs.x);
-      int64_t const dy = static_cast<int64_t>(lhs.y) - static_cast<int64_t>(rhs.y);
-      int64_t const dz = static_cast<int64_t>(lhs.z) - static_cast<int64_t>(rhs.z);
-
-      return distance_t{
-          .distance = static_cast<uint64_t>(dx * dx + dy * dy + dz * dz),
-          .idx_a = idx_a,
-          .idx_b = idx_b,
-      };
+    template <size_t BranchingFactor, class Key, class Value>
+    [[maybe_unused]] void sift_down_with_aux(simd_span_t<Key> keys,
+                                             std::span<Value> values,
+                                             size_t pos) {
+      using args_t = sift_down_with_aux_args_t<BranchingFactor, Key, Value>;
+      HWY_EXPORT_AND_DYNAMIC_DISPATCH_T(sift_down_with_aux<args_t>)(args_t{keys, values, pos});
     }
 
     struct disjoint_set_t {
@@ -149,557 +407,383 @@ namespace aoc25 {
       std::vector<uint16_t> size_;
     };
 
-    std::vector<distance_t> calc_pairwise_distances(std::span<point_t const> points) {
-      std::vector<distance_t> result;
-      result.reserve(points.size() * (points.size() - 1) / 2);
-
-      for (uint16_t idx_a = 0; idx_a < points.size(); ++idx_a) {
-        for (uint16_t idx_b = idx_a + 1; idx_b < points.size(); ++idx_b) {
-          result.push_back(dist(idx_a, idx_b, points[idx_a], points[idx_b]));
-        }
-      }
-
-      return result;
-    }
-
-    std::vector<point_t> parse_input(simd_string_view_t input) {
-      std::vector<point_t> result;
+    points_t parse_input(simd_string_view_t input) {
+      size_t const num_points = aoc25::count(input.as_span(), '\n');
+      auto result = points_t(num_points);
 
       split(input, [&](simd_string_view_t line) {
         std::array<uint32_t, 3> coords;
-        size_t coord_idx = 0;
 
-        while (!line.empty()) {
+        for (size_t coord_idx = 0; coord_idx < coords.size(); ++coord_idx) {
           size_t const comma_pos = line.find(',');
           simd_string_view_t const token = line.substr(0, comma_pos);
-          convert_single_int<uint64_t>(token, [&](uint64_t value) { coords[coord_idx++] = value; });
-          line.remove_prefix(token.size() + (comma_pos == line.npos ? 0 : 1));
+          convert_single_int<uint64_t>(token, [&](uint64_t value) { coords[coord_idx] = value; });
+
+          if (coord_idx + 1 < coords.size()) {  // Don't update line after parsing last number.
+            assert(comma_pos != line.npos);
+            line.remove_prefix(token.size() + (comma_pos == line.npos ? 0 : 1));
+          }
         }
 
-        result.push_back(point_t{.x = coords[0], .y = coords[1], .z = coords[2]});
+        result.push_back(coords[0], coords[1], coords[2]);
       });
 
       SPDLOG_TRACE("Parsed {} points: {}", result.size(), result);
       return result;
     }
 
-    struct ext_point_t : public point_t {
-      uint16_t idx;
-    };
+    /* Structure of arrays object to improve runtime. */
+    struct distances_t {
+      distances_t()
+          : distances_t(0) {}
 
-    [[maybe_unused]] std::string format_as(ext_point_t const & obj) {
-      return fmt::format("<idx: {}, x: {}, y: {}, z: {}>", obj.idx, obj.x, obj.y, obj.z);
-    }
+      explicit distances_t(size_t reserve_size) {
+        idx_a_.reserve(reserve_size);
+        idx_b_.reserve(reserve_size);
+        distances_.reserve(reserve_size);
+      }
 
-    struct closest_pair_finder_t {
-      closest_pair_finder_t(std::span<ext_point_t const> sorted_x,
-                            std::span<ext_point_t const> sorted_y,
-                            std::span<ext_point_t const> sorted_z)
-          : sorted_x_(sorted_x), sorted_y_(sorted_y), sorted_z_(sorted_z), pairs_() {}
+      size_t size() const { return distances_.size(); }
+      bool empty() const { return distances_.empty(); }
 
-      std::vector<std::pair<uint16_t, uint16_t>> find_pairs(size_t num_pairs) {
-        num_pairs_ = num_pairs;
-        max_accepted_dist_ = std::numeric_limits<uint64_t>::max();
-        num_dist_calcs_ = 0;
+      uint32_t & idx_a(size_t index) {
+        assert(index < idx_a_.size());
+        return idx_a_[index];
+      }
 
-        // Must preallocate to ensure references stay valid.
-        size_t const num_split_lists =
-            std::ceil(std::log2(sorted_x_.size())) - std::log2(brute_force_threshold) + 1;
+      uint32_t idx_a(size_t index) const {
+        assert(index < idx_a_.size());
+        return idx_a_[index];
+      }
 
-        auto const prepare_lists = [&](std::vector<split_list_t> & lists) {
-          lists.clear();
-          lists.resize(num_split_lists);
+      uint32_t & idx_b(size_t index) {
+        assert(index < idx_b_.size());
+        return idx_b_[index];
+      }
 
-          // Add some extra buffer to account for uneven split along median list element.
-          size_t num_entries = (1.5 * sorted_x_.size()) / 2;
+      uint32_t idx_b(size_t index) const {
+        assert(index < idx_b_.size());
+        return idx_b_[index];
+      }
 
-          for (size_t idx = 0; idx < num_split_lists; ++idx, num_entries /= 2) {
-            assert(num_entries > 0);
-            lists[idx].lhs.reserve(num_entries);
-            lists[idx].rhs.reserve(num_entries);
-          }
-        };
+      double & distance(size_t index) {
+        assert(index < distances_.size());
+        return distances_[index];
+      }
 
-        prepare_lists(x_lists_);
-        prepare_lists(y_lists_);
-        prepare_lists(z_lists_);
+      double distance(size_t index) const {
+        assert(index < distances_.size());
+        return distances_[index];
+      }
 
-        pairs_.clear();
-        pairs_.reserve(num_pairs);
+      void resize(size_t new_size) {
+        idx_a_.resize(new_size);
+        idx_b_.resize(new_size);
+        distances_.resize(new_size);
+      }
 
-        find_pairs_recursive_3d(sorted_x_, sorted_y_, sorted_z_, 0);
+      simd_span_t<uint32_t> idx_a() { return idx_a_; }
+      simd_span_t<uint32_t const> idx_a() const { return idx_a_; }
 
-        SPDLOG_DEBUG("Calculated {} distances to find {} closest pairs", num_dist_calcs_,
-                     num_pairs_);
+      simd_span_t<uint32_t> idx_b() { return idx_b_; }
+      simd_span_t<uint32_t const> idx_b() const { return idx_b_; }
 
-        return pairs_ | std::views::transform([](distance_t const & d) {
-                 return std::make_pair(d.idx_a, d.idx_b);
-               }) |
-               std::ranges::to<std::vector>();
+      simd_span_t<double> distances() { return distances_; }
+      simd_span_t<double const> distances() const { return distances_; }
+
+      void push_back(uint32_t idx_a, uint32_t idx_b, double distance) {
+        idx_a_.push_back(idx_a);
+        idx_b_.push_back(idx_b);
+        distances_.push_back(distance);
+      }
+
+      void erase(size_t index) {
+        assert(index < distances_.size());
+
+        using std::swap;
+        swap(idx_a_.back(), idx_a_[index]);
+        swap(idx_b_.back(), idx_b_[index]);
+        swap(distances_.back(), distances_[index]);
+
+        idx_a_.pop_back();
+        idx_b_.pop_back();
+        distances_.pop_back();
       }
 
      private:
-      struct split_list_t {
-        std::vector<ext_point_t> lhs;
-        std::vector<ext_point_t> rhs;
+      // Indices are 32 bit, because there's no proper 16-bit SIMD instructions.
+      // Distances are double, because there's no proper 64-bit integer SIMD multiplications.
+      simd_vector_t<uint32_t> idx_a_;
+      simd_vector_t<uint32_t> idx_b_;
+      simd_vector_t<double> distances_;
+    };
+
+    [[maybe_unused]] std::string format_as(distances_t const & obj) {
+      return fmt::format("{::s}", std::views::zip(obj.idx_a(), obj.idx_b(), obj.distances()) |
+                                      std::views::transform([](auto const & e) {
+                                        return fmt::format("<idx_a: {}, idx_b: {}, distance: {}>",
+                                                           std::get<0>(e), std::get<1>(e),
+                                                           std::get<2>(e));
+                                      }));
+    }
+
+    /** @brief An N-ary max tree with a maximum size.
+     *
+     * The tree is builds a max-tree of up the given number of elements. New elements can be pushed
+     * using push_or_replace(), which either adds the new element (if the tree is not full), or
+     * replaces the current maximum (if the tree is full and the new element is smaller than the
+     * current maximum). This allows keeping track of the "best N" elements seen so far.
+     */
+    template <class Key, class Value, size_t BranchingFactor>
+      requires std::is_arithmetic_v<Key>
+    class sized_n_ary_max_tree_t {
+     public:
+      struct element_t {
+        Key key;
+        Value value;
       };
 
-      static constexpr size_t brute_force_threshold = 16;
+      struct element_ref_t {
+        Key const & key;
+        Value const & value;
+      };
 
-      std::span<ext_point_t const> sorted_x_;
-      std::span<ext_point_t const> sorted_y_;
-      std::span<ext_point_t const> sorted_z_;
-
-      size_t num_pairs_;
-      std::vector<distance_t> pairs_;
-      uint64_t max_accepted_dist_;
-      uint64_t num_dist_calcs_;
-
-      std::vector<split_list_t> x_lists_;
-      std::vector<split_list_t> y_lists_;
-      std::vector<split_list_t> z_lists_;
-
-      std::vector<ext_point_t> slab_points_y_;
-      std::vector<ext_point_t> slab_points_z_;
-      std::vector<ext_point_t> strip_points_z_;
-
-      bool try_add_distance(distance_t const & distance) {
-        ++num_dist_calcs_;
-
-        // Insert into list of pairs if it's among the closest found so far.
-        size_t const num_current_pairs = pairs_.size();
-
-        if (num_current_pairs < num_pairs_) {
-          // NOTE: Keep accepted max distance at the maximum value to allow filling up the list.
-          pairs_.push_back(distance);
-
-          if ((num_current_pairs + 1) == num_pairs_) {
-            std::make_heap(pairs_.begin(), pairs_.end());
-            max_accepted_dist_ = pairs_.front().distance;
-          }
-
-          return true;
-        } else if (distance < pairs_.front()) {
-          std::pop_heap(pairs_.begin(), pairs_.end());
-          pairs_.back() = distance;
-          std::push_heap(pairs_.begin(), pairs_.end());
-          max_accepted_dist_ = pairs_.front().distance;
-
-          return true;
-        }
-
-        return false;
+      explicit sized_n_ary_max_tree_t(size_t max_size)
+          : keys_{}, values_{}, current_size_{0}, max_size_{max_size} {
+        keys_.reserve(max_size_);
+        values_.reserve(max_size_);
       }
 
-      void bruteforce_distances(std::span<ext_point_t const> points) {
-        size_t const num_points = points.size();
+      void push(element_t elem) {
+        assert(current_size_ < max_size_);
+        keys_.push_back(elem.key);
+        values_.push_back(std::move(elem.value));
+        sift_up(current_size_++);
+      }
 
-        for (uint16_t idx_i = 0; idx_i < num_points - 1; ++idx_i) {
-          auto const & point_i = points[idx_i];
-
-          for (uint16_t idx_j = idx_i + 1; idx_j < num_points; ++idx_j) {
-            auto const & point_j = points[idx_j];
-
-            auto const dx = static_cast<int64_t>(point_i.x) - static_cast<int64_t>(point_j.x);
-            if (static_cast<uint64_t>(dx * dx) > max_accepted_dist_) {
-              break;  // Since points are sorted, we can't obtain any closer distances.
-            }
-
-            auto const distance = dist(point_i.idx, point_j.idx, point_i, point_j);
-            try_add_distance(distance);
-          }
+      /**
+       * @brief Inserts a value or replaces the max:
+       *   - If heap is not full, push the new value normally.
+       *   - If heap is full AND (new_value < current max), replace root and sift down.
+       *   - Otherwise, do nothing (new value is too large to enter the "best X" set).
+       */
+      void push_or_replace(element_t elem) {
+        if (current_size_ < max_size_) {
+          push(std::move(elem));
+        } else if (is_higher_in_heap(keys_[0], elem.key)) {
+          keys_[0] = elem.key;
+          values_[0] = std::move(elem.value);
+          sift_down(0);
         }
       }
 
-      void bruteforce_split_distances(std::span<ext_point_t const> points, uint32_t x_split) {
-        size_t const num_points = points.size();
+      element_t pop() {
+        assert(current_size_ != 0);
+        auto result = element_t{.key = keys_[0], .value = std::move(values_[0])};
 
-        for (uint16_t idx_i = 0; idx_i < num_points - 1; ++idx_i) {
-          auto const & point_i = points[idx_i];
-          bool const lhs_left_of_split = point_i.x <= x_split;
-
-          for (uint16_t idx_j = idx_i + 1; idx_j < num_points; ++idx_j) {
-            auto const & point_j = points[idx_j];
-
-            auto const dy = static_cast<int64_t>(point_i.y) - static_cast<int64_t>(point_j.y);
-            if (static_cast<uint64_t>(dy * dy) > max_accepted_dist_) {
-              break;  // Since points are sorted, we can't obtain any closer distances.
-            }
-
-            bool const rhs_left_of_split = point_j.x <= x_split;
-            if (lhs_left_of_split == rhs_left_of_split) {
-              continue;
-            }
-
-            auto const distance = dist(point_i.idx, point_j.idx, point_i, point_j);
-            try_add_distance(distance);
-          }
+        if (current_size_-- >= 2) {
+          keys_[0] = keys_[current_size_];
+          values_[0] = std::move(values_[current_size_]);
+          sift_down(0);
         }
-      }
 
-      template <class Accessor>
-      split_list_t const & split_list(std::span<ext_point_t const> points,
-                                      uint32_t axis_value,
-                                      Accessor accessor,
-                                      std::vector<split_list_t> & split_lists,
-                                      uint8_t split_level) {
-        auto & result = split_lists.at(split_level);
-        assert(points.data() != result.lhs.data());
-        assert(points.data() != result.rhs.data());
-        result.lhs.clear();
-        result.rhs.clear();
-
-        for (auto const & point : points) {
-          if (std::invoke(accessor, point) <= axis_value) {
-            result.lhs.push_back(point);
-          } else {
-            result.rhs.push_back(point);
-          }
-        }
+        keys_.pop_back();
+        values_.pop_back();
 
         return result;
       }
 
-      void find_pairs_recursive_2d(std::span<ext_point_t const> sorted_y,
-                                   std::span<ext_point_t const> sorted_z,
-                                   uint32_t x_split,
-                                   [[maybe_unused]] uint8_t split_level) {
-        SPDLOG_DEBUG("{:{}}[slab recursion] num points: {}, level: {}", "", 2 * (split_level + 1),
-                     sorted_y.size(), split_level);
-
-        // Apply same approach as for 3D recursion, but now treat it as a 2D problem.
-        if (sorted_y.size() <= brute_force_threshold) {
-          bruteforce_split_distances(sorted_y, x_split);
-        } else {
-          // Else, split points at median Y value.
-          uint32_t const median_y = sorted_y[sorted_y.size() / 2].y;
-          auto const split_it = std::ranges::find_if(
-              sorted_y.subspan(sorted_y.size() / 2), [&](auto const y) { return y > median_y; },
-              &ext_point_t::y);
-          size_t const split_size_lhs = std::ranges::distance(sorted_y.begin(), split_it);
-
-          auto const y_split_lhs = sorted_y.subspan(0, split_size_lhs);
-          auto const y_split_rhs = sorted_y.subspan(split_size_lhs);
-          auto const & z_split =
-              split_list(sorted_z, median_y, &ext_point_t::y, z_lists_, split_level);
-
-          find_pairs_recursive_2d(y_split_lhs, z_split.lhs, x_split, split_level + 1);
-          find_pairs_recursive_2d(y_split_rhs, z_split.rhs, x_split, split_level + 1);
-
-          // Find points within strip of width "max accepted distance" from the median Y value.
-          find_center_points(sorted_z, strip_points_z_, &ext_point_t::y, median_y, split_level + 2);
-          find_strip_pairs(strip_points_z_, x_split, median_y, split_level + 1);
-        }
+      element_ref_t top() const {
+        assert(current_size_ > 0);
+        return element_ref_t{.key = keys_[0], .value = values_[0]};
       }
 
-      void find_strip_pairs(std::span<ext_point_t const> sorted_z,
-                            uint32_t x_split,
-                            uint32_t y_split,
-                            [[maybe_unused]] uint8_t split_level) {
-        SPDLOG_DEBUG("{:{}}[strip search] num points: {}, level: {}", "", 2 * (split_level + 1),
-                     sorted_z.size(), split_level);
+      size_t size() const { return current_size_; }
 
-        // NOTE: Because we search for N closest pairs, we can not limit the number of neighbors
-        // checked for each point to 7. For a single closest pair search this is the maximum number
-        // of neighbors to check for each point in 2D space.
-        size_t const num_points = sorted_z.size();
+      // Allow iterating over all the elements without popping them off.
+      auto keys_begin() const { return keys_.begin(); }
+      auto keys_end() const { return keys_.begin() + current_size_; }
 
-        for (size_t idx_i = 0; idx_i < num_points - 1; ++idx_i) {
-          auto const & point_i = sorted_z[idx_i];
-          [[maybe_unused]] bool const lhs_left_of_x_split = point_i.x <= x_split;
-          [[maybe_unused]] bool const lhs_left_of_y_split = point_i.y <= y_split;
+      auto values_begin() const { return values_.begin(); }
+      auto values_end() const { return values_.begin() + current_size_; }
 
-          for (size_t idx_j = idx_i + 1; idx_j < num_points; ++idx_j) {
-            auto const & point_j = sorted_z[idx_j];
+      std::span<Key const> keys() const { return keys_; }
+      std::span<Value const> values() const { return values_; }
 
-            auto const dz = static_cast<int64_t>(point_i.z) - static_cast<int64_t>(point_j.z);
-            if (static_cast<uint64_t>(dz * dz) > max_accepted_dist_) {
-              break;  // Since points are sorted, we can't obtain any closer distances.
-            }
+      std::vector<Value> extract_values() && { return std::move(values_); }
 
-            // Only check pairs that are on opposite sides of the split plane/line.
-            bool const rhs_left_of_x_split = point_j.x <= x_split;
-            bool const rhs_left_of_y_split = point_j.y <= y_split;
+     private:
+      static constexpr size_t branching_factor = BranchingFactor;
 
-            bool const different_x_side = lhs_left_of_x_split != rhs_left_of_x_split;
-            bool const different_y_side = lhs_left_of_y_split != rhs_left_of_y_split;
+      simd_vector_t<Key> keys_;
+      std::vector<Value> values_;
+      size_t current_size_;
+      size_t max_size_;
 
-            if (!different_x_side || !different_y_side) {
-              continue;
-            }
-
-            auto const distance = dist(point_i.idx, point_j.idx, point_i, point_j);
-            try_add_distance(distance);
-          }
-        }
+      bool is_higher_in_heap(Key const & lhs, Key const & rhs) const {
+        // By inverting the order of rhs and lhs, std::less creates a max-heap, which is the same
+        // behavior as STL.
+        return rhs < lhs;
       }
 
-      void find_pairs_recursive_3d(std::span<ext_point_t const> sorted_x,
-                                   std::span<ext_point_t const> sorted_y,
-                                   std::span<ext_point_t const> sorted_z,
-                                   uint8_t split_level) {
-        SPDLOG_DEBUG("{:{}}[recursion] num points: {}, level: {}", "", 2 * split_level,
-                     sorted_x.size(), split_level);
-
-        if (sorted_x.size() <= brute_force_threshold) {
-          bruteforce_distances(sorted_x);
-        } else {
-          // Else, split points at median X value.
-          uint32_t const median_x = sorted_x[sorted_x.size() / 2].x;
-          auto const split_it = std::ranges::find_if(
-              sorted_x.subspan(sorted_x.size() / 2), [&](auto const x) { return x > median_x; },
-              &ext_point_t::x);
-          size_t const split_size_lhs = std::ranges::distance(sorted_x.begin(), split_it);
-
-          auto const x_split_lhs = sorted_x.subspan(0, split_size_lhs);
-          auto const x_split_rhs = sorted_x.subspan(split_size_lhs);
-          auto const & y_split =
-              split_list(sorted_y, median_x, &ext_point_t::x, y_lists_, split_level);
-          auto const & z_split =
-              split_list(sorted_z, median_x, &ext_point_t::x, z_lists_, split_level);
-
-          find_pairs_recursive_3d(x_split_lhs, y_split.lhs, z_split.lhs, split_level + 1);
-          find_pairs_recursive_3d(x_split_rhs, y_split.rhs, z_split.rhs, split_level + 1);
-
-          // Find points within slab of width "max accepted distance" from the median X value.
-          // TODO: This always matches all points. Is there any optimization here? What if we just
-          // don't do it?
-          find_center_points(sorted_y, slab_points_y_, &ext_point_t::x, median_x, split_level + 1);
-          find_center_points(sorted_z, slab_points_z_, &ext_point_t::x, median_x, split_level + 1);
-
-          // Find all nearest pairs inside the slab.
-          // NOTE: No need to increase split level, since y_split and z_split aren't used anymore.
-          find_pairs_recursive_2d(slab_points_y_, slab_points_z_, median_x, split_level);
-        }
-      }
-
-      template <class Accessor>
-      void find_center_points(std::span<ext_point_t const> src,
-                              std::vector<ext_point_t> & dest,
-                              Accessor accessor,
-                              uint32_t midpoint,
-                              [[maybe_unused]] uint8_t split_level) {
-        assert(src.data() != dest.data());
-        dest.clear();
-
-        [[maybe_unused]] uint64_t max_d = 0;
-
-        for (auto const & point : src) {
-          auto const d =
-              static_cast<int64_t>(std::invoke(accessor, point)) - static_cast<int64_t>(midpoint);
-          if (static_cast<uint64_t>(d * d) < max_accepted_dist_) {
-            dest.push_back(point);
+      void sift_up(size_t pos) {
+        while (pos > 0) {
+          size_t parent = (pos - 1) / branching_factor;
+          if (!is_higher_in_heap(keys_[pos], keys_[parent])) {
+            break;
           }
 
-          max_d = std::max(max_d, static_cast<uint64_t>(d * d));
+          using std::swap;
+          swap(keys_[pos], keys_[parent]);
+          swap(values_[pos], values_[parent]);
+          pos = parent;
         }
+      }
 
-        SPDLOG_DEBUG("{:{}}[center points] {} / {} points within distance {}, max d: {}, level: {}",
-                     "", 2 * split_level, dest.size(), src.size(),
-                     (max_accepted_dist_ == std::numeric_limits<uint64_t>::max()
-                          ? "∞"
-                          : fmt::format("{}", max_accepted_dist_)),
-                     max_d, split_level);
+      void sift_down(size_t pos) {
+        if constexpr ((branching_factor == 2) || (branching_factor == 4)) {
+          sift_down_with_aux<branching_factor>(simd_span_t{keys_}, std::span{values_}, pos);
+        } else {
+          sift_down_scalar(pos);
+        }
+      }
+
+      [[maybe_unused]] void sift_down_scalar(size_t pos) {
+        while (true) {
+          size_t first_child = branching_factor * pos + 1;
+          if (first_child >= current_size_) {
+            break;
+          }
+
+          // Find the best among up to branching_factor children.
+          size_t best_child = first_child;
+          size_t end_child = std::min(first_child + branching_factor, current_size_);
+
+          for (size_t child = first_child + 1; child < end_child; ++child) {
+            best_child = (is_higher_in_heap(keys_[child], keys_[best_child])) ? child : best_child;
+          }
+
+          if (!is_higher_in_heap(keys_[best_child], keys_[pos])) {
+            break;
+          }
+
+          using std::swap;
+          swap(keys_[pos], keys_[best_child]);
+          swap(values_[pos], values_[best_child]);
+          pos = best_child;
+        }
       }
     };
+
+    struct connection_idx_t {
+      uint16_t idx_a;
+      uint16_t idx_b;
+    };
+
+    std::vector<connection_idx_t> calculate_n_shortest_distances(points_t const & points,
+                                                                 size_t num_distances) {
+      // Calculate all pairwise distances, and keep track of the shortest N ones.
+      auto result = sized_n_ary_max_tree_t<double, connection_idx_t, 4>(num_distances);
+      using push_t = typename decltype(result)::element_t;
+
+      // Prime with 1 element of maximum distance, so we can always check against largest distance.
+      result.push(push_t{
+          .key = std::numeric_limits<double>::infinity(),
+          .value = connection_idx_t{0, 0},
+      });
+      auto & max_accepted_dist = result.top().key;
+
+      uint16_t const num_points = points.size();  // Because this doesn't seem to get cached.
+      [[maybe_unused]] uint32_t num_calc_skipped = 0;
+
+      // Calculate a chunk of distances at a time.
+      static constexpr size_t max_chunk_size = 32;  // Found by trying out various sizes.
+      auto distance_chunk = simd_vector_t<double>(max_chunk_size);
+
+      for (uint16_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
+        auto const point_a = point_t{
+            .x = points.x(idx_a),
+            .y = points.y(idx_a),
+            .z = points.z(idx_a),
+        };
+
+        uint16_t idx_b = idx_a + 1;
+
+        auto const process_distance_chunk = [&](size_t chunk_size) -> bool {
+          auto const x_b = points.x().subspan(idx_b, chunk_size);
+          auto const y_b = points.y().subspan(idx_b, chunk_size);
+          auto const z_b = points.z().subspan(idx_b, chunk_size);
+
+          // If X-distance is already too large, skip the entire chunk.
+          if (auto const dx = point_a.x - x_b[0]; dx * dx >= max_accepted_dist) {
+            return false;  // Since points are sorted, we can't obtain any closer distances.
+          }
+
+          auto dist_out = simd_span_t{distance_chunk}.subspan(0, chunk_size);
+          calculate_distances(point_a, x_b, y_b, z_b, dist_out);
+
+          return true;
+        };
+
+        for (; idx_b < num_points; idx_b += max_chunk_size) {
+          auto const chunk_size = std::min<size_t>(num_points - idx_b, max_chunk_size);
+          bool const continue_processing = process_distance_chunk(chunk_size);
+
+          if (!continue_processing) {
+            num_calc_skipped += num_points - idx_b;
+            break;
+          }
+
+          // Push distances to heap.
+          for (size_t dist_idx = 0; dist_idx < chunk_size; ++dist_idx) {
+            auto const distance = distance_chunk[dist_idx];
+            result.push_or_replace(push_t{
+                .key = distance,
+                .value = connection_idx_t{idx_a, static_cast<uint16_t>(idx_b + dist_idx)},
+            });
+          }
+        }
+      }
+
+      [[maybe_unused]] size_t const num_max_calculations = num_points * (num_points - 1) / 2;
+      SPDLOG_DEBUG("Skipped {:.0f}% ({} / {}) distance calculations",
+                   (100.0 * num_calc_skipped) / num_max_calculations, num_calc_skipped,
+                   num_max_calculations);
+      return std::move(result).extract_values();
+    }
 
   }  // namespace
 
   uint64_t day_t<8>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+    points_t const points =
+        [&] {  // Sort points first, so we can skip some distance calculations later on.
+          auto orig_points = parse_input(input);
+          auto indices = std::views::iota(0u, static_cast<uint16_t>(orig_points.size())) |
+                         std::ranges::to<std::vector>();
 
-    // Do a very dumb thing and calculate all pairwise distances.
-    std::vector<distance_t> distances = calc_pairwise_distances(points);
+          std::ranges::sort(indices, [&](uint16_t lhs, uint16_t rhs) {
+            return orig_points.x(lhs) < orig_points.x(rhs);
+          });
 
-    // NOTE: Sketchy code, because the parameters for the example differ from the "real" input.
-    size_t const connections_to_make = (distances.size() < 1000) ? 10 : 1000;
-
-    // Put the first 1000 distances at the beginning. No need to sort them.
-    std::nth_element(distances.begin(), distances.begin() + connections_to_make, distances.end());
-
-    // Connect the 1000 closest pairs using a disjoint set.
-    auto circuit_sets = disjoint_set_t(points.size());
-
-    for (size_t i = 0; i < connections_to_make; ++i) {
-      auto const & distance = distances.at(i);
-      [[maybe_unused]] auto const new_size = circuit_sets.merge(distance.idx_a, distance.idx_b);
-      SPDLOG_DEBUG("Connected {} & {}, group size: {}, distance: {}", distance.idx_a,
-                   distance.idx_b, new_size, distance);
-    }
-
-    // No need to sort, just find the largest 3 circuits.
-    auto circuit_sizes = std::move(circuit_sets).sizes();
-    std::nth_element(circuit_sizes.begin(), circuit_sizes.begin() + 3, circuit_sizes.end(),
-                     std::greater{});
-    auto const largest_circuits = std::span(circuit_sizes).first(3);
-
-    SPDLOG_DEBUG("Largest circuits: {}", largest_circuits);
-    return std::accumulate(largest_circuits.begin(), largest_circuits.end(), 1ULL,
-                           std::multiplies<uint64_t>());
-  }
-
-  uint64_t day_t<8>::solve(part_t<1>, version_t<1>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+          auto result = points_t(orig_points.size());
+          for (auto const idx : indices) {
+            result.push_back(orig_points.x(idx), orig_points.y(idx), orig_points.z(idx));
+          }
+          return result;
+        }();
 
     // NOTE: Sketchy code, because the parameters for the example differ from the "real" input.
     size_t const connections_to_make = (points.size() < 1000) ? 10 : 1000;
 
-    // Calculate all pairwise distances, and keep track of the smallest N ones.
-    std::vector<distance_t> distances;
-    distances.reserve(connections_to_make);
-
-    uint16_t num_pushed = 0;
-    uint16_t const num_points = points.size();  // Because this doesn't seem to get cached.
-
-    for (uint16_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
-      for (uint16_t idx_b = idx_a + 1; idx_b < num_points; ++idx_b) {
-        auto const distance = dist(idx_a, idx_b, points[idx_a], points[idx_b]);
-
-        if (num_pushed < connections_to_make) {
-          distances.push_back(distance);
-          if (++num_pushed == connections_to_make) {
-            std::make_heap(distances.begin(), distances.end());
-          }
-        } else if (distance < distances.front()) {
-          // Note: Using a combined pop + push (i.e. replace) doesn't really speed things up.
-          std::pop_heap(distances.begin(), distances.end());
-          distances.back() = distance;
-          std::push_heap(distances.begin(), distances.end());
-        }
-      }
-    }
+    // Get the N shortest distances.
+    auto const distances_idxes = calculate_n_shortest_distances(points, connections_to_make);
 
     // Connect the nearest N pairs.
     auto circuit_sets = disjoint_set_t(points.size());
 
-    for (auto const & distance : distances) {
-      [[maybe_unused]] auto const new_size = circuit_sets.merge(distance.idx_a, distance.idx_b);
-      SPDLOG_DEBUG("Connected {:3d} & {:3d}, group size: {}, distance: {}", distance.idx_a,
-                   distance.idx_b, new_size, distance);
-    }
-
-    // No need to sort, just find the largest 3 circuits.
-    auto circuit_sizes = std::move(circuit_sets).sizes();
-    std::ranges::nth_element(circuit_sizes, circuit_sizes.begin() + 3, std::greater{});
-    auto const largest_circuits = std::span(circuit_sizes).first(3);
-
-    SPDLOG_DEBUG("Largest circuits: {}", largest_circuits);
-    return std::accumulate(largest_circuits.begin(), largest_circuits.end(), 1ULL,
-                           std::multiplies<uint64_t>());
-  }
-
-  uint64_t day_t<8>::solve(part_t<1>, version_t<2>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
-
-    // First create a list sorted per coordinate.
-    // TODO: Try speed up by storing sorted indices instead.
-    auto const create_sorted_copy = [&](auto sort_fn) {
-      auto result = std::views::iota(size_t{0}, points.size()) |
-                    std::views::transform([&points](size_t idx) -> ext_point_t {
-                      auto const & point = points.at(idx);
-                      ext_point_t ext;
-                      ext.x = point.x;
-                      ext.y = point.y;
-                      ext.z = point.z;
-                      ext.idx = static_cast<uint16_t>(idx);
-                      return ext;
-                    }) |
-                    std::ranges::to<std::vector>();
-      std::ranges::sort(result, sort_fn);
-      return result;
-    };
-
-    auto const sorted_x = create_sorted_copy([](auto const & lhs, auto const & rhs) {
-      return std::tie(lhs.x, lhs.y, lhs.z) < std::tie(rhs.x, rhs.y, rhs.z);
-    });
-    auto const sorted_y = create_sorted_copy([](auto const & lhs, auto const & rhs) {
-      return std::tie(lhs.y, lhs.z, lhs.x) < std::tie(rhs.y, rhs.z, rhs.x);
-    });
-    auto const sorted_z = create_sorted_copy([](auto const & lhs, auto const & rhs) {
-      return std::tie(lhs.z, lhs.x, lhs.y) < std::tie(rhs.z, rhs.x, rhs.y);
-    });
-
-    // NOTE: Sketchy code, because the parameters for the example differ from the "real" input.
-    size_t const num_pairs = (points.size() < 1000) ? 10 : 1000;
-
-    // Now apply a divide and conquer approach to find the K closest pairs.
-    auto pair_finder = closest_pair_finder_t(sorted_x, sorted_y, sorted_z);
-    auto const closest_pairs = pair_finder.find_pairs(num_pairs);
-
-    // Connect the nearest N pairs.
-    auto circuit_sets = disjoint_set_t(points.size());
-
-    for (auto const & [idx_a, idx_b] : closest_pairs) {
-      [[maybe_unused]] auto const new_size = circuit_sets.merge(idx_a, idx_b);
-      SPDLOG_DEBUG("Connected {:3d} & {:3d}, group size: {}, distance: {}", idx_a, idx_b, new_size,
-                   dist(idx_a, idx_b, points[idx_a], points[idx_b]));
-    }
-
-    // Extract the largest 3 circuits.
-    auto circuit_sizes = std::move(circuit_sets).sizes();
-    std::ranges::nth_element(circuit_sizes, circuit_sizes.begin() + 3, std::greater{});
-    auto const largest_circuits = std::span(circuit_sizes).first(3);
-
-    SPDLOG_DEBUG("Largest circuits: {}", largest_circuits);
-    return std::accumulate(largest_circuits.begin(), largest_circuits.end(), 1ULL,
-                           std::multiplies<uint64_t>());
-  }
-
-  uint64_t day_t<8>::solve(part_t<1>, version_t<3>, simd_string_view_t input) {
-    std::vector<point_t> points = parse_input(input);
-
-    // NOTE: Sketchy code, because the parameters for the example differ from the "real" input.
-    size_t const connections_to_make = (points.size() < 1000) ? 10 : 1000;
-
-    // Sort points first, so we can skip some distance calculations.
-    std::ranges::sort(points, std::less<>{});
-
-    // Calculate all pairwise distances, and keep track of the smallest N ones.
-    std::vector<distance_t> distances;
-    distances.reserve(connections_to_make);
-
-    auto max_accepted_dist = std::numeric_limits<uint64_t>::max();
-    uint16_t const num_points = points.size();  // Because this doesn't seem to get cached.
-    [[maybe_unused]] uint32_t num_calc_skipped = 0;
-
-    for (uint16_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
-      for (uint16_t idx_b = idx_a + 1; idx_b < num_points; ++idx_b) {
-        if (auto const dx =
-                static_cast<int64_t>(points[idx_a].x) - static_cast<int64_t>(points[idx_b].x);
-            static_cast<uint64_t>(dx * dx) >= max_accepted_dist) {
-          num_calc_skipped += num_points - idx_b;
-          break;  // Since points are sorted, we can't obtain any closer distances.
-        }
-
-        auto const distance = dist(idx_a, idx_b, points[idx_a], points[idx_b]);
-        auto const num_pushed = distances.size();
-
-        if (num_pushed < connections_to_make) {
-          distances.push_back(distance);
-          if (num_pushed + 1 == connections_to_make) {
-            std::make_heap(distances.begin(), distances.end());
-            max_accepted_dist = distances.front().distance;
-          }
-        } else if (distance.distance < max_accepted_dist) {
-          // Note: Using a combined pop + push (i.e. replace) doesn't really speed things up.
-          std::pop_heap(distances.begin(), distances.end());
-          distances.back() = distance;
-          std::push_heap(distances.begin(), distances.end());
-          max_accepted_dist = distances.front().distance;
-        }
-      }
-    }
-
-    SPDLOG_DEBUG("Skipped {} / {} distance calculations", num_calc_skipped,
-                 num_points * num_points / 2);
-
-    // Connect the nearest N pairs.
-    auto circuit_sets = disjoint_set_t(points.size());
-
-    for (auto const & distance : distances) {
-      [[maybe_unused]] auto const new_size = circuit_sets.merge(distance.idx_a, distance.idx_b);
-      SPDLOG_DEBUG("Connected {:3d} & {:3d}, group size: {}, distance: {}", distance.idx_a,
-                   distance.idx_b, new_size, distance);
+    for (auto const & idxes : distances_idxes) {
+      [[maybe_unused]] auto const new_size = circuit_sets.merge(idxes.idx_a, idxes.idx_b);
+      SPDLOG_DEBUG("Connected {:3d} & {:3d}, group size: {}", idxes.idx_a, idxes.idx_b, new_size);
     }
 
     // No need to sort, just find the largest 3 circuits.
@@ -713,94 +797,97 @@ namespace aoc25 {
   }
 
   uint64_t day_t<8>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+    points_t const points = parse_input(input);
 
-    // Do a very dumb thing and calculate all pairwise distances.
-    std::vector<distance_t> distances = calc_pairwise_distances(points);
+    /* Calculating the 3D Delaunay triangulation is the mathematical "optimal" solution to solve
+     * this, since it will give us approximately 6N edges which are guaranteed to contain the
+     * minimum spanning tree. However, it's costly to compute, and extremely complex (i.e. you'd
+     * use e.g. the CGAL library for it). A solution using it runs in approximately 4 ms.
+     *
+     * Instead of doing that, we will go for a much more brute-force approach, which works faster
+     * here because there's only 1000 points.
+     */
 
-    // Make it a heap, so we can pop off the smallest distances.
-    std::ranges::make_heap(distances, std::greater{});
+    /* Brute-force: for each point keep track of the shortest distance to any connected point.
+     * Start with the last point connected, and keep connecting to the point with the shortest
+     * distance to any of the connected points.
+     *
+     * Note: We use the last point, because it makes it easier to keep the remaining_points and
+     * shortest_distances in sync (since an erase() call will swap the last entry with the erased
+     * one, so if we erase the last point from remaining_points at the start, the other points
+     * remain in the same order).
+     */
+    auto shortest_distances = distances_t(points.size() - 1);
+    auto remaining_points = points;
 
-    // Connect until everything is connected.
-    auto circuit_sets = disjoint_set_t(points.size());
+    {
+      uint32_t const first_point_idx = points.size() - 1;
+      auto const first_point = point_t{
+          .x = points.x(first_point_idx),
+          .y = points.y(first_point_idx),
+          .z = points.z(first_point_idx),
+      };
 
-    size_t num_connected = 0;
-    auto distances_end = distances.end();
+      // Set indices.
+      shortest_distances.resize(points.size() - 1);
+      std::ranges::copy(std::views::iota(0u, static_cast<uint32_t>(points.size() - 1)),
+                        shortest_distances.idx_a().begin());
+      std::ranges::fill(shortest_distances.idx_b(), first_point_idx);
 
-    while (num_connected != points.size()) {
-      std::pop_heap(distances.begin(), distances_end--, std::greater{});
-      auto const distance = *distances_end;
+      // Calculate all distances from the first point to all others.
+      simd_span_t<double const> const points_x = points.x().subspan(0, points.size() - 1);
+      simd_span_t<double const> const points_y = points.y().subspan(0, points.size() - 1);
+      simd_span_t<double const> const points_z = points.z().subspan(0, points.size() - 1);
 
-      num_connected = circuit_sets.merge(distance.idx_a, distance.idx_b).value_or(num_connected);
-      SPDLOG_DEBUG("Connection # {}: {} & {}, group size: {}, distance: {}",
-                   std::distance(distances_end, distances.end()), distance.idx_a, distance.idx_b,
-                   num_connected, distance);
+      calculate_distances(first_point, points_x, points_y, points_z,
+                          shortest_distances.distances());
+
+      // Remove the first point from remaining points.
+      remaining_points.erase(first_point_idx);
     }
 
-    // Find X coordinates of the last two connected points.
-    auto const & last_distance = *distances_end;
-    auto const & point_a = points.at(last_distance.idx_a);
-    auto const & point_b = points.at(last_distance.idx_b);
-    SPDLOG_DEBUG("Last connected points: {} & {}", point_a, point_b);
+    // Scratch area for newly calculated distances.
+    simd_vector_t<double> new_distances;
 
-    return point_a.x * point_b.x;
-  }
+    for (uint16_t num_connections = 0; num_connections < points.size() - 1; ++num_connections) {
+      // Find the shortest distance in the list.
+      auto const min_pos =
+          aoc25::find_minimum_pos(simd_span_t<double const>{shortest_distances.distances()});
 
-  uint64_t day_t<8>::solve(part_t<2>, version_t<1>, simd_string_view_t input) {
-    std::vector<point_t> const points = parse_input(input);
+      SPDLOG_DEBUG("Connection # {}: {} & {}, distance: {}", num_connections + 1,
+                   shortest_distances.idx_a(min_pos), shortest_distances.idx_b(min_pos),
+                   shortest_distances.distance(min_pos));
 
-    // Calculate the 3D Delaunay triangulation of the points. The edges of this triangulation are
-    // guaranteed to contain the minimum spanning tree. Since this is a tricky afair, so we use
-    // the CGAL library.
-    using cgal_kernel_t = CGAL::Exact_predicates_inexact_constructions_kernel;
-    using cgal_vertex_t = CGAL::Triangulation_vertex_base_with_info_3<uint16_t, cgal_kernel_t>;
-    using cgal_data_t = CGAL::Triangulation_data_structure_3<cgal_vertex_t>;
-    using cgal_triangulation_t = CGAL::Delaunay_triangulation_3<cgal_kernel_t, cgal_data_t>;
-    using cgal_point_t = cgal_triangulation_t::Point;
-    using cgal_edge_t = cgal_triangulation_t::Edge;
+      if (shortest_distances.size() == 1) {
+        // Find X coordinates of the last two connected points.
+        auto const & x_a = points.x(shortest_distances.idx_a(min_pos));
+        auto const & x_b = points.x(shortest_distances.idx_b(min_pos));
+        SPDLOG_DEBUG("Last connected points at x: {} & {}", x_a, x_b);
 
-    auto const cgal_points = points | std::views::transform([&](point_t const & p) {
-                               uint16_t const idx = &p - points.data();
-                               return std::make_pair(cgal_point_t(p.x, p.y, p.z), idx);
-                             });
-
-    auto const delaunay = cgal_triangulation_t(cgal_points.begin(), cgal_points.end());
-    SPDLOG_DEBUG("Delaunay triangulation has {} edges", delaunay.number_of_edges());
-    assert(delaunay.is_valid());
-
-    // Extract edges from the triangulation and sort them by distance.
-    auto delaunay_edges = delaunay.finite_edges() |
-                          std::views::transform([&](cgal_edge_t const & edge) -> distance_t {
-                            int const idx_a = edge.first->vertex(edge.second)->info();
-                            int const idx_b = edge.first->vertex(edge.third)->info();
-                            auto const & point_a = points.at(idx_a);
-                            auto const & point_b = points.at(idx_b);
-                            return dist(idx_a, idx_b, point_a, point_b);
-                          }) |
-                          std::ranges::to<std::vector>();
-    std::ranges::sort(delaunay_edges, std::less{});
-    SPDLOG_DEBUG("Extracted {} edges from Delaunay triangulation", delaunay_edges.size());
-
-    // Connect edges from the Delaunay triangulation until we have a minimum spanning tree.
-    auto circuit_sets = disjoint_set_t(points.size());
-    [[maybe_unused]] size_t num_edges_processed = 0;
-
-    for (auto const & dist : delaunay_edges) {
-      num_edges_processed++;
-      auto const tree_size = circuit_sets.merge(dist.idx_a, dist.idx_b);
-
-      if (tree_size.has_value()) {
-        SPDLOG_DEBUG("Connected {} & {}, group size: {}, distance: {}", dist.idx_a, dist.idx_b,
-                     *tree_size, dist.distance);
+        return x_a * x_b;
       }
 
-      if (tree_size == points.size()) {  // This connection completed the spanning tree.
-        auto const & point_a = points.at(dist.idx_a);
-        auto const & point_b = points.at(dist.idx_b);
+      auto const new_connected_idx = shortest_distances.idx_a(min_pos);
 
-        SPDLOG_DEBUG("Processed {} edges, last connected points: {} & {}", num_edges_processed,
-                     point_a, point_b);
-        return point_a.x * point_b.x;
+      // Ensure distances and points stay "in sync".
+      shortest_distances.erase(min_pos);
+      remaining_points.erase(min_pos);
+
+      {  // Update the remaining distances with the newly connected point.
+        // First calculate all distances from the new point to all others.
+        auto const new_point = point_t{
+            .x = points.x(new_connected_idx),
+            .y = points.y(new_connected_idx),
+            .z = points.z(new_connected_idx),
+        };
+
+        new_distances.resize(remaining_points.size());
+        calculate_distances(new_point, remaining_points.x(), remaining_points.y(),
+                            remaining_points.z(), new_distances);
+
+        // Now update the shortest distances.
+        update_distances(shortest_distances.distances(), shortest_distances.idx_b(), new_distances,
+                         new_connected_idx);
       }
     }
 

@@ -105,12 +105,8 @@ namespace aoc25 {
   template <>
   struct day_t<8> {
     uint64_t solve(part_t<1>, version_t<0>, simd_string_view_t input);
-    uint64_t solve(part_t<1>, version_t<1>, simd_string_view_t input);
-    uint64_t solve(part_t<1>, version_t<2>, simd_string_view_t input);
-    uint64_t solve(part_t<1>, version_t<3>, simd_string_view_t input);
 
     uint64_t solve(part_t<2>, version_t<0>, simd_string_view_t input);
-    uint64_t solve(part_t<2>, version_t<1>, simd_string_view_t input);
   };
 
 }  // namespace aoc25

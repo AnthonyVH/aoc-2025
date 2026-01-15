@@ -102,6 +102,7 @@ set(CGAL_DIR "${CGAL_SOURCE_DIR}" CACHE PATH "Path to CGAL source" FORCE)
 FetchContent_Declare(
   CGAL
   SYSTEM
+  EXCLUDE_FROM_ALL TRUE # Prevent CGAL from being built by "all" target.
   URL https://github.com/CGAL/cgal/releases/download/v5.6.3/CGAL-5.6.3.tar.xz # Newer version doesn't work.
   SOURCE_DIR "${CGAL_SOURCE_DIR}"
   BINARY_DIR "${CGAL_BINARY_DIR}"

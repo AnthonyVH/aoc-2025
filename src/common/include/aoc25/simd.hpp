@@ -6,6 +6,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace aoc25 {
 
@@ -279,6 +280,10 @@ namespace aoc25 {
 
   template <std::integral T>
   uint64_t count(simd_span_t<T const> span, T const & value);
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_minimum_pos(simd_span_t<T const> input);
 
 }  // namespace aoc25
 

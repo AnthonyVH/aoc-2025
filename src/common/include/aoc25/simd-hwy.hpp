@@ -147,6 +147,74 @@ namespace aoc25 {
       return hn::ReduceSum(combine_tag, combined_accumulator);
     }
 
+    template <class T>
+      requires std::is_arithmetic_v<T>
+    size_t find_minimum_pos(simd_span_t<T const> input) {
+      static constexpr auto tag = hn::ScalableTag<T>{};
+      static constexpr size_t lanes = hn::Lanes(tag);
+
+      auto const * const HWY_RESTRICT data = reinterpret_cast<T const *>(input.data());
+
+      T min_value = std::numeric_limits<T>::max();
+      size_t min_pos = 0;
+
+      auto min_values = hn::Set(tag, min_value);
+      size_t pos = 0;
+
+      auto const process_minimums = [&](hn::Mask<decltype(tag)> const & is_less,
+                                        bool update_min_values) {
+        if (uint32_t match_bits = hn::BitsFromMask(tag, is_less); match_bits != 0) [[unlikely]] {
+          while (match_bits != 0) {
+            // Process in order, since there might be multiple "temporary" minimums.
+            uint32_t const lane = std::countr_zero(match_bits);
+            match_bits &= match_bits - 1;  // Clear lowest set bit.
+
+            auto const value = data[pos + lane];
+            if (value < min_value) {
+              min_value = value;
+              min_pos = pos + lane;
+            }
+          }
+
+          if (update_min_values) {
+            min_values = hn::Set(tag, min_value);
+          }
+        }
+      };
+
+      // Process initial unaligned bytes.
+      size_t const unaligned_bytes = reinterpret_cast<uintptr_t>(data) % (lanes * sizeof(T));
+      size_t const unaligned_words = unaligned_bytes / sizeof(T);
+      assert(unaligned_bytes % sizeof(T) == 0);
+
+      if (unaligned_words != 0) {
+        size_t const initial_words = std::min(lanes - unaligned_words, input.size());
+
+        auto const chunk = hn::LoadU(tag, data + pos);
+        auto const is_less = hn::MaskedLt(hn::FirstN(tag, initial_words), chunk, min_values);
+        process_minimums(is_less, true);
+
+        pos += initial_words;
+      }
+
+      for (; pos + lanes <= input.size(); pos += lanes) {  // Process aligned chunks.
+        auto const chunk = hn::Load(tag, data + pos);
+        auto const is_less = hn::Lt(chunk, min_values);
+        process_minimums(is_less, true);
+      }
+
+      if (pos < input.size()) {  // Handle last partial chunk.
+        size_t const lanes_remaining = input.size() - pos;
+        assert(pos + lanes_remaining == input.size());
+
+        auto const chunk = hn::LoadNOr(min_values, tag, data + pos, lanes_remaining);
+        auto const is_less = hn::Lt(chunk, min_values);
+        process_minimums(is_less, false);
+      }
+
+      return min_pos;
+    }
+
   }  // namespace HWY_NAMESPACE
 
 }  // namespace aoc25
@@ -159,6 +227,13 @@ namespace aoc25 {
   uint64_t count(simd_span_t<T const> input, T const & value) {
     HWY_EXPORT_T(table, count<T>);
     return HWY_DYNAMIC_DISPATCH_T(table)(input, value);
+  }
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_minimum_pos(simd_span_t<T const> input) {
+    HWY_EXPORT_T(table, find_minimum_pos<T>);
+    return HWY_DYNAMIC_DISPATCH_T(table)(input);
   }
 
 }  // namespace aoc25

@@ -25,6 +25,8 @@
 namespace aoc25 {
   namespace {
 
+    static constexpr uint8_t max_neighbors_for_removable_roll = 4;
+
     struct grid_t {
       simd_vector_t<uint8_t> data;
       size_t dimension;
@@ -50,7 +52,92 @@ namespace aoc25 {
                           "\n"));
     }
 
-    static constexpr uint8_t max_neighbors_for_removable_roll = 4;
+    /** @brief Grid which stores which neighbor contains a paper roll, using a bitset.
+     * Note that it doesn't keep track of whether a cell itself contains a roll of paper.
+     */
+    struct bitset_grid_t {
+     public:
+      explicit bitset_grid_t(grid_t const & rolls)
+          : neighbors_(calculate_neighbors_impl(rolls))
+          , mask_bit_idx_to_offset_{std::to_array<int16_t>({
+                +1,                                          // 0: right
+                -1,                                          // 1: left
+                static_cast<int16_t>(+rolls.dimension + 0),  // 2: below
+                static_cast<int16_t>(+rolls.dimension + 1),  // 3: below right
+                static_cast<int16_t>(+rolls.dimension - 1),  // 4: below left
+                static_cast<int16_t>(-rolls.dimension + 0),  // 5: above
+                static_cast<int16_t>(-rolls.dimension + 1),  // 6: above right
+                static_cast<int16_t>(-rolls.dimension - 1),  // 7: above left
+            })}
+          , dimension_(rolls.dimension) {}
+
+      uint16_t dimension() const { return dimension_; }
+
+      uint8_t & operator[](uint16_t idx) { return neighbors_.at(idx); }
+      uint8_t operator[](uint16_t idx) const { return neighbors_.at(idx); }
+
+      uint8_t & operator[](uint8_t row, uint8_t col) { return operator[](row * dimension_ + col); }
+
+      uint8_t operator[](uint8_t row, uint8_t col) const {
+        return operator[](row * dimension_ + col);
+      }
+
+      simd_span_t<uint8_t> row(uint8_t row_idx) {
+        assert(row_idx < dimension_);
+        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
+      }
+
+      simd_span_t<uint8_t const> row(uint8_t row_idx) const {
+        assert(row_idx < dimension_);
+        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
+      }
+
+      inline int16_t mask_bit_idx_to_offset(uint8_t bit_idx) const {
+        // Faster than using a big lookup table of std::spans to offsets for each possible bitset.
+        assert(bit_idx < mask_bit_idx_to_offset_.size());
+        return mask_bit_idx_to_offset_[bit_idx];
+      }
+
+      /** @brief Given an bit index from a mask, return the mask that identifies that neighbor.
+       * I.e. if a cell has a neighbor indicated at bit index 6 (above right), the returned mask
+       * should have the bit set for the position <below left>. This mask can then be used to clear
+       * that bit in the cell's neighbor's bitset.
+       */
+      uint8_t mask_bit_idx_to_neighbor_mask(uint8_t bit_idx) const {
+        static constexpr std::array<uint8_t, 8> const lut = std::to_array<uint8_t>({
+            0b000'000'10,  // right: 0 -> left
+            0b000'000'01,  // left: 1 -> right
+
+            0b001'000'00,  // below: 2 -> above
+            0b100'000'00,  // below right: 3 -> above left
+            0b010'000'00,  // below left: 4  -> above right
+
+            0b000'001'00,  // above: 5 -> below
+            0b000'100'00,  // above right: 6 -> below left
+            0b000'010'00,  // above left: 7 -> below right
+        });
+
+        assert(bit_idx < 8);
+        return lut[bit_idx];
+      }
+
+     private:
+      // Bitsets for each position in the grid. The format of the bitset, from MSB to LSB, is:
+      // <above left> <above right> <above> <below left> <below right> <below> <left> <right>
+      simd_vector_t<uint8_t> neighbors_;
+      std::array<int16_t, 8> mask_bit_idx_to_offset_;
+      int16_t dimension_;
+
+      static simd_vector_t<uint8_t> calculate_neighbors_impl(grid_t const & rolls);
+    };
+
+    [[maybe_unused]] std::string format_as(bitset_grid_t const & obj) {
+      return fmt::format("{}", fmt::join(std::views::iota(size_t{0}, obj.dimension()) |
+                                             std::views::transform([&obj](size_t row_idx) {
+                                               return fmt::format("{::08b}", obj.row(row_idx));
+                                             }),
+                                         "\n"));
+    }
 
   }  // namespace
 }  // namespace aoc25
@@ -281,6 +368,95 @@ namespace aoc25 {
         return result;
       }
 
+      template <class D>
+        requires std::is_same_v<hn::TFromD<D>, uint8_t>
+      hn::VFromD<D> popcount(D const & tag, hn::VFromD<D> const & v) {
+        auto const bit_counts = hn::Dup128VecFromValues(tag,
+                                                        /* 0 */ 0, /* 1 */ 1, /* 2 */ 1, /* 3 */ 2,
+                                                        /* 4 */ 1, /* 5 */ 2, /* 6 */ 2, /* 7 */ 3,
+                                                        /* 8 */ 1, /* 9 */ 2, /* a */ 2, /* b */ 3,
+                                                        /* c */ 2, /* d */ 3, /* e */ 3, /* f */ 4);
+
+        auto const lower_nibbles = hn::And(v, hn::Set(tag, 0x0f));
+        auto const upper_nibbles = hn::And(hn::ShiftRight<4>(v), hn::Set(tag, 0x0f));
+
+        auto const lower_counts = hn::TableLookupBytes(bit_counts, lower_nibbles);
+        auto const upper_counts = hn::TableLookupBytes(bit_counts, upper_nibbles);
+
+        return hn::Add(lower_counts, upper_counts);
+      }
+
+      size_t mark_initially_removable(grid_t const & roll_grid,
+                                      bitset_grid_t const & neighbors_grid,
+                                      simd_span_t<int16_t> removable_positions) {
+        static constexpr auto in_tag = hn::ScalableTag<uint8_t>{};
+        static constexpr auto out_tag = hn::ScalableTag<int16_t>{};
+        static constexpr auto half_in_tag = hn::Half<decltype(in_tag)>{};
+
+        static constexpr size_t in_lanes = hn::Lanes(in_tag);
+        static constexpr size_t out_lanes = hn::Lanes(out_tag);
+        static_assert(in_lanes == 2 * out_lanes);
+
+        uint8_t const dimension = neighbors_grid.dimension();
+
+        int16_t * HWY_RESTRICT dest_ptr = removable_positions.data();
+        auto const num_neighbors_limit = hn::Set(in_tag, max_neighbors_for_removable_roll);
+        auto idxes = hn::Iota(out_tag, 0);
+
+        auto const write_idxes = [&](hn::Mask<decltype(out_tag)> const mask, size_t max_lanes) {
+          size_t const num_written = hn::CompressStore(idxes, mask, out_tag, dest_ptr);
+          dest_ptr += num_written;
+          idxes = hn::Add(idxes, hn::Set(out_tag, max_lanes));
+        };
+
+        // Process each row separately. This way we don't have to worry about padding in roll grid.
+        for (uint8_t row = 0; row < dimension; ++row) {
+          simd_span_t const roll_row = roll_grid.row(row + 1).subspan(1, dimension);
+          simd_span_t const neighbors_row = neighbors_grid.row(row);
+
+          size_t col_pos = 0;
+          for (; col_pos + in_lanes <= dimension; col_pos += in_lanes) {
+            auto const roll_chunk = hn::LoadU(in_tag, roll_row.data() + col_pos);
+            auto const neighbors_chunk = hn::LoadU(in_tag, neighbors_row.data() + col_pos);
+
+            auto const num_neighbors = popcount(in_tag, neighbors_chunk);
+            auto is_removable = hn::Lt(num_neighbors, num_neighbors_limit);
+            is_removable = hn::And(is_removable, hn::Eq(roll_chunk, hn::Set(in_tag, 1)));
+
+            write_idxes(hn::PromoteMaskTo(out_tag, half_in_tag,
+                                          hn::LowerHalfOfMask(half_in_tag, is_removable)),
+                        out_lanes);
+            write_idxes(hn::PromoteMaskTo(out_tag, half_in_tag,
+                                          hn::UpperHalfOfMask(half_in_tag, is_removable)),
+                        out_lanes);
+          }
+
+          if (col_pos < dimension) {
+            uint8_t const lanes_remaining = dimension - col_pos;
+
+            auto const roll_chunk = hn::LoadU(in_tag, roll_row.data() + col_pos);
+            auto const neighbors_chunk = hn::LoadU(in_tag, neighbors_row.data() + col_pos);
+
+            auto const num_neighbors = popcount(in_tag, neighbors_chunk);
+            auto is_removable = hn::MaskedLt(hn::FirstN(in_tag, lanes_remaining), num_neighbors,
+                                             num_neighbors_limit);
+            is_removable = hn::And(is_removable, hn::Eq(roll_chunk, hn::Set(in_tag, 1)));
+
+            write_idxes(hn::PromoteMaskTo(out_tag, half_in_tag,
+                                          hn::LowerHalfOfMask(half_in_tag, is_removable)),
+                        std::min<size_t>(out_lanes / 2, lanes_remaining));
+
+            if (lanes_remaining >= out_lanes / 2) {
+              write_idxes(hn::PromoteMaskTo(out_tag, half_in_tag,
+                                            hn::UpperHalfOfMask(half_in_tag, is_removable)),
+                          lanes_remaining - out_lanes / 2);
+            }
+          }
+        }
+
+        return std::ranges::distance(removable_positions.data(), dest_ptr);
+      }
+
     }  // namespace HWY_NAMESPACE
   }  // namespace
 }  // namespace aoc25
@@ -290,117 +466,83 @@ HWY_AFTER_NAMESPACE();
 #ifdef HWY_ONCE
 
 namespace aoc25 {
-
   namespace {
 
-    HWY_EXPORT(calculate_neighbors);
-
-    [[maybe_unused]]
     simd_vector_t<uint8_t> calculate_neighbors(grid_t const & rolls) {
+      HWY_EXPORT(calculate_neighbors);
       return HWY_DYNAMIC_DISPATCH(calculate_neighbors)(rolls);
     }
 
-    HWY_EXPORT(count_removables);
-
-    [[maybe_unused]]
     uint32_t count_removables(grid_t const & rolls) {
+      HWY_EXPORT(count_removables);
       return HWY_DYNAMIC_DISPATCH(count_removables)(rolls);
     }
 
-    HWY_EXPORT(to_grid);
-
-    [[maybe_unused]]
     grid_t to_grid(simd_string_view_t input) {
+      HWY_EXPORT(to_grid);
       return HWY_DYNAMIC_DISPATCH(to_grid)(input);
     }
 
-    /** @brief Grid which stores which neighbor contains a paper roll, using a bitset.
-     * Note that it doesn't keep track of whether a cell itself contains a roll of paper.
-     */
-    struct bitset_grid_t {
-     public:
-      explicit bitset_grid_t(grid_t const & rolls)
-          : neighbors_(calculate_neighbors_impl(rolls))
-          , mask_bit_idx_to_offset_{std::to_array<int16_t>({
-                +1,                                          // 0: right
-                -1,                                          // 1: left
-                static_cast<int16_t>(+rolls.dimension + 0),  // 2: below
-                static_cast<int16_t>(+rolls.dimension + 1),  // 3: below right
-                static_cast<int16_t>(+rolls.dimension - 1),  // 4: below left
-                static_cast<int16_t>(-rolls.dimension + 0),  // 5: above
-                static_cast<int16_t>(-rolls.dimension + 1),  // 6: above right
-                static_cast<int16_t>(-rolls.dimension - 1),  // 7: above left
-            })}
-          , dimension_(rolls.dimension) {}
+    size_t mark_initially_removable(grid_t const & roll_grid,
+                                    bitset_grid_t const & neighbors_grid,
+                                    simd_span_t<int16_t> removable_positions) {
+      HWY_EXPORT(mark_initially_removable);
+      return HWY_DYNAMIC_DISPATCH(mark_initially_removable)(roll_grid, neighbors_grid,
+                                                            removable_positions);
+    }
 
-      uint16_t dimension() const { return dimension_; }
+    simd_vector_t<uint8_t> bitset_grid_t::calculate_neighbors_impl(grid_t const & rolls) {
+      return calculate_neighbors(rolls);
+    }
 
-      uint8_t & operator[](uint16_t idx) { return neighbors_.at(idx); }
-      uint8_t operator[](uint16_t idx) const { return neighbors_.at(idx); }
+    uint16_t remove_rolls(bitset_grid_t & neighbors_grid,
+                          uint16_t num_removable,
+                          std::span<int16_t> removable_positions) {
+      // Remove rolls until no more are accessible. Note that in this case, there's no need to check
+      // whether the cell itself contains a roll of paper, since if it doesn't, it's not marked as a
+      // neighbor in any other cell.
+      uint32_t num_removed = 0;
 
-      uint8_t & operator[](uint8_t row, uint8_t col) { return operator[](row * dimension_ + col); }
+      while (num_removable > 0) {
+        int16_t const cell_idx = removable_positions[--num_removable];
+        SPDLOG_DEBUG("Processing cell {} (neighbors: {:08b})", cell_idx, neighbors_grid[cell_idx]);
 
-      uint8_t operator[](uint8_t row, uint8_t col) const {
-        return operator[](row * dimension_ + col);
+        num_removed += 1;
+
+        // Update neighbors, and enqueue any newly removable positions.
+        uint8_t neighbors_mask = neighbors_grid[cell_idx];
+        assert(std::popcount(neighbors_mask) < max_neighbors_for_removable_roll);
+
+        // Note: It's faster iterating over the bits this way than using a LUT.
+        while (neighbors_mask != 0) {
+          uint8_t const bit_idx = std::countr_zero(neighbors_mask);
+          neighbors_mask &= neighbors_mask - 1;  // Clear lowest set bit.
+
+          int16_t const offset = neighbors_grid.mask_bit_idx_to_offset(bit_idx);
+          int16_t const neighbor_idx = cell_idx + offset;
+
+          uint8_t & neighbor_bits = neighbors_grid[neighbor_idx];
+          uint8_t const num_neighbors = std::popcount(neighbor_bits);
+
+          // Branching really messes up the execution speed here, because it's so unpredictable
+          // (around 45% mispredictions). So just do idempotent operations. If the cell is not ready
+          // to be visited, then this has no effect on the outcome, since we ignore the "push" by
+          // not increasing num_removable.
+          assert(num_removable < removable_positions.size());
+          removable_positions[num_removable] = neighbor_idx;
+          num_removable += num_neighbors == max_neighbors_for_removable_roll;
+
+          SPDLOG_DEBUG(
+              " Updating neighbor {:4d} (offset {:+4d}), bits: {:08b} (#: {}), mask: {:08b}",
+              neighbor_idx, offset, neighbor_bits, num_neighbors,
+              neighbors_grid.mask_bit_idx_to_neighbor_mask(bit_idx));
+
+          // Update neighbor's neighbor bitset to remove reference to this cell.
+          neighbor_bits &= ~neighbors_grid.mask_bit_idx_to_neighbor_mask(bit_idx);
+        }
       }
 
-      simd_span_t<uint8_t> row(uint8_t row_idx) {
-        assert(row_idx < dimension_);
-        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
-      }
-
-      simd_span_t<uint8_t const> row(uint8_t row_idx) const {
-        assert(row_idx < dimension_);
-        return simd_span_t(neighbors_).subspan(row_idx * dimension_, dimension_);
-      }
-
-      inline int16_t mask_bit_idx_to_offset(uint8_t bit_idx) const {
-        // Faster than using a big lookup table of std::spans to offsets for each possible bitset.
-        assert(bit_idx < mask_bit_idx_to_offset_.size());
-        return mask_bit_idx_to_offset_[bit_idx];
-      }
-
-      /** @brief Given an bit index from a mask, return the mask that identifies that neighbor.
-       * I.e. if a cell has a neighbor indicated at bit index 6 (above right), the returned mask
-       * should have the bit set for the position <below left>. This mask can then be used to clear
-       * that bit in the cell's neighbor's bitset.
-       */
-      uint8_t mask_bit_idx_to_neighbor_mask(uint8_t bit_idx) const {
-        static constexpr std::array<uint8_t, 8> const lut = std::to_array<uint8_t>({
-            0b000'000'10,  // right: 0 -> left
-            0b000'000'01,  // left: 1 -> right
-
-            0b001'000'00,  // below: 2 -> above
-            0b100'000'00,  // below right: 3 -> above left
-            0b010'000'00,  // below left: 4  -> above right
-
-            0b000'001'00,  // above: 5 -> below
-            0b000'100'00,  // above right: 6 -> below left
-            0b000'010'00,  // above left: 7 -> below right
-        });
-
-        assert(bit_idx < 8);
-        return lut[bit_idx];
-      }
-
-     private:
-      // Bitsets for each position in the grid. The format of the bitset, from MSB to LSB, is:
-      // <above left> <above right> <above> <below left> <below right> <below> <left> <right>
-      simd_vector_t<uint8_t> neighbors_;
-      std::array<int16_t, 8> mask_bit_idx_to_offset_;
-      int16_t dimension_;
-
-      static simd_vector_t<uint8_t> calculate_neighbors_impl(grid_t const & rolls) {
-        return calculate_neighbors(rolls);
-      }
-    };
-
-    [[maybe_unused]] std::string format_as(bitset_grid_t const & obj) {
-      return fmt::format("{}", fmt::join(std::views::iota(size_t{0}, obj.dimension()) |
-                                             std::views::transform([&obj](size_t row_idx) {
-                                               return fmt::format("{::08b}", obj.row(row_idx));
-                                             }),
-                                         "\n"));
+      return num_removed;
     }
 
   }  // namespace
@@ -418,71 +560,16 @@ namespace aoc25 {
     SPDLOG_DEBUG("Neighbors grid:\n{}", neighbors_grid);
 
     // Populate initial removable positions.
-    uint8_t const dimension = neighbors_grid.dimension();
-
-    // Because push_back() is costing time, we side-step it by creating a maximum size vector.
+    // Because push_back() is costing time, we avoid it by creating a maximum size vector.
     auto removable_positions =
-        std::vector<uint16_t>(aoc25::count(simd_span_t{grid.data}, static_cast<uint8_t>(1)));
-    uint16_t num_removable = 0;
+        simd_vector_t<int16_t>(aoc25::count(simd_span_t{grid.data}, static_cast<uint8_t>(1)));
     SPDLOG_DEBUG("# removable positions buffer size: {}", removable_positions.size());
 
-    for (uint8_t row = 0; row < dimension; ++row) {
-      auto const grid_row = grid.row(row + 1).subspan(1, dimension);
-      auto const neighbors_row = neighbors_grid.row(row);
-
-      for (uint8_t col = 0; col < dimension; ++col) {
-        bool const has_roll = grid_row[col] == 1;
-        uint8_t const num_neighbors = std::popcount(neighbors_row[col]);
-
-        if (has_roll & (num_neighbors < max_neighbors_for_removable_roll)) {
-          uint16_t const cell_idx = row * dimension + col;
-          removable_positions[num_removable++] = cell_idx;
-        }
-      }
-    }
+    size_t num_removable = mark_initially_removable(grid, neighbors_grid, removable_positions);
     SPDLOG_DEBUG("# initial removable positions: {}", num_removable);
 
-    // Remove rolls until no more are accessible. Note that in this case, there's no need to check
-    // whether the cell itself contains a roll of paper, since if it doesn't, it's not marked as a
-    // neighbor in any other cell.
-    uint32_t num_removed = 0;
-
-    while (num_removable > 0) {
-      uint16_t const cell_idx = removable_positions[--num_removable];
-      SPDLOG_DEBUG("Processing cell {} (neighbors: {:08b})", cell_idx, neighbors_grid[cell_idx]);
-
-      num_removed += 1;
-
-      // Update neighbors, and enqueue any newly removable positions.
-      uint32_t neighbors_mask = neighbors_grid[cell_idx];
-      while (neighbors_mask != 0) {
-        uint8_t const bit_idx = std::countr_zero(neighbors_mask);
-        neighbors_mask &= neighbors_mask - 1;  // Clear lowest set bit.
-
-        int16_t const offset = neighbors_grid.mask_bit_idx_to_offset(bit_idx);
-        uint16_t const neighbor_idx = cell_idx + offset;
-
-        uint8_t & neighbor_bits = neighbors_grid[neighbor_idx];
-        uint8_t const num_neighbors = std::popcount(neighbor_bits);
-
-        if (num_neighbors < max_neighbors_for_removable_roll) {  // Cell was already enqueued.
-          continue;
-        } else if (num_neighbors == max_neighbors_for_removable_roll) {
-          // Update of neighbor_bits in the next lines unsets 1 bit, so if the number of set bits
-          // was 4 before, then the cell is now accessible (i.e. it will have exactly 3 neighbors).
-          removable_positions[num_removable++] = neighbor_idx;
-        }
-
-        SPDLOG_DEBUG(" Updating neighbor {:4d} (offset {:+4d}), bits: {:08b} (#: {}), mask: {:08b}",
-                     neighbor_idx, offset, neighbor_bits, num_neighbors,
-                     neighbors_grid.mask_bit_idx_to_neighbor_mask(bit_idx));
-
-        // Update neighbor's neighbor bitset to remove reference to this cell.
-        neighbor_bits &= ~neighbors_grid.mask_bit_idx_to_neighbor_mask(bit_idx);
-      }
-    }
-
-    return num_removed;
+    // Remove rolls until no more are accessible.
+    return remove_rolls(neighbors_grid, num_removable, removable_positions);
   }
 
 }  // namespace aoc25

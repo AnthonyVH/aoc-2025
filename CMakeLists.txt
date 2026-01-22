@@ -67,71 +67,13 @@ find_package(OpenMP REQUIRED)
 # Fetch external dependencies
 set(FETCHCONTENT_QUIET OFF)
 
-#FetchContent_Declare(
-#  boost-preprocessor
-#  SYSTEM
-#  GIT_REPOSITORY https://github.com/boostorg/preprocessor.git
-#  GIT_TAG        boost-1.90.0
-#  GIT_SHALLOW    TRUE
-#  GIT_PROGRESS   TRUE
-#)
-#FetchContent_MakeAvailable(boost-preprocessor)
-
-# Note: No need to set BOOST_INCLUDE_LIBRARIES. The required Boost libraries will be compiled based
-# on what other targets set as dependencies.
-set(BOOST_ENABLE_CMAKE ON)
-FetchContent_Declare(
-  Boost
-  SYSTEM
-  EXCLUDE_FROM_ALL TRUE # Prevent all Boost components from being built by "all" target.
-  URL https://github.com/boostorg/boost/releases/download/boost-1.90.0/boost-1.90.0-cmake.tar.xz
-)
-FetchContent_MakeAvailable(Boost)
-
-# CGAL CMake support it very broken, so we have to do a lot of workarounds here.
-set(WITH_CGAL_Core OFF CACHE BOOL "Enable separate core library support in CGAL" FORCE)
-set(WITH_CGAL_ImageIO OFF CACHE BOOL "Enable image I/O support in CGAL" FORCE)
-set(WITH_CGAL_Qt5 OFF CACHE BOOL "Enable Qt6 support in CGAL" FORCE)
-set(CGAL_Boost_USE_STATIC_LIBS ON CACHE BOOL "Link CGAL against static Boost libraries" FORCE)
-set(CGAL_DISABLE_GMP ON CACHE BOOL "Disable GMP usage in CGAL" FORCE)
-set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON CACHE BOOL "Stop CGAL complaining about Debug builds" FORCE)
-
-set(CGAL_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/cgal-build" CACHE PATH "Path to CGAL build" FORCE)
-set(CGAL_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/cgal-src" CACHE PATH "Path to CGAL source" FORCE)
-set(CGAL_DIR "${CGAL_SOURCE_DIR}" CACHE PATH "Path to CGAL source" FORCE)
-FetchContent_Declare(
-  CGAL
-  SYSTEM
-  EXCLUDE_FROM_ALL TRUE # Prevent CGAL from being built by "all" target.
-  URL https://github.com/CGAL/cgal/releases/download/v5.6.3/CGAL-5.6.3.tar.xz # Newer version doesn't work.
-  SOURCE_DIR "${CGAL_SOURCE_DIR}"
-  BINARY_DIR "${CGAL_BINARY_DIR}"
-)
-FetchContent_MakeAvailable(CGAL)
-find_package(CGAL REQUIRED) # CGAL CMake support is very broken, so this is also required.
-target_link_libraries(CGAL # How delightful...
-  INTERFACE
-    Boost::algorithm
-    Boost::any
-    Boost::config
-    Boost::foreach
-    Boost::headers
-    Boost::iterator
-    Boost::mpl
-    Boost::multiprecision
-    Boost::property_map
-    Boost::variant
-)
-
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Enable testing of the benchmark library." FORCE)
 set(BENCHMARK_ENABLE_LTO ${ENABLE_LTO} CACHE BOOL "Enable link time optimisation of the benchmark library." FORCE)
 FetchContent_Declare(
   google-benchmark
   SYSTEM
-  GIT_REPOSITORY https://github.com/google/benchmark.git
-  GIT_TAG        v1.9.4
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://github.com/google/benchmark/archive/refs/tags/v1.9.4.tar.gz
 )
 FetchContent_MakeAvailable(google-benchmark)
 
@@ -142,10 +84,8 @@ set(HWY_ENABLE_TESTS OFF CACHE BOOL "Enable HWY tests" FORCE)
 FetchContent_Declare(
   google-highway
   SYSTEM
-  GIT_REPOSITORY https://github.com/google/highway.git
-  GIT_TAG        1.3.0
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://github.com/google/highway/releases/download/1.3.0/highway-1.3.0.tar.gz
 )
 FetchContent_MakeAvailable(google-highway)
 
@@ -158,40 +98,24 @@ target_compile_definitions(hwy PUBLIC HWY_COMPILE_ONLY_STATIC)
 FetchContent_Declare(
   eigen
   SYSTEM
-  GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-  GIT_TAG        5.0.1
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://gitlab.com/libeigen/eigen/-/archive/5.0.1/eigen-5.0.1.tar.gz
 )
 FetchContent_MakeAvailable(eigen)
 
 FetchContent_Declare(
   fmt
   SYSTEM
-  GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG        12.1.0
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://github.com/fmtlib/fmt/releases/download/12.1.0/fmt-12.1.0.zip
 )
 FetchContent_MakeAvailable(fmt)
 
 FetchContent_Declare(
-  kokkos-mdspan
-  SYSTEM
-  GIT_REPOSITORY https://github.com/kokkos/mdspan.git
-  GIT_TAG        stable
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
-)
-FetchContent_MakeAvailable(kokkos-mdspan)
-
-FetchContent_Declare(
   magic_enum
   SYSTEM
-  GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
-  GIT_TAG        v0.9.7
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://github.com/Neargye/magic_enum/releases/download/v0.9.7/magic_enum-v0.9.7.tar.gz
 )
 FetchContent_MakeAvailable(magic_enum)
 
@@ -199,10 +123,8 @@ set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "Use external fmt library" FORCE)
 FetchContent_Declare(
   spdlog
   SYSTEM
-  GIT_REPOSITORY https://github.com/gabime/spdlog.git
-  GIT_TAG        v1.16.0
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
+  EXCLUDE_FROM_ALL
+  URL              https://github.com/gabime/spdlog/archive/refs/tags/v1.16.0.tar.gz
 )
 FetchContent_MakeAvailable(spdlog)
 

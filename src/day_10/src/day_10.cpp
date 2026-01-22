@@ -24,33 +24,6 @@
 #include <type_traits>
 #include <utility>
 
-#undef HWY_TARGET_INCLUDE
-#define HWY_TARGET_INCLUDE "src/day_10.cpp"
-
-// clang-format off
-#include <hwy/foreach_target.h>
-// clang-format on
-
-#include <hwy/highway.h>
-
-HWY_BEFORE_NAMESPACE();
-
-namespace aoc25 {
-  namespace {
-    namespace HWY_NAMESPACE {
-
-      namespace hn = hwy::HWY_NAMESPACE;
-
-      [[maybe_unused]] void compiler_stop_complaining() {}
-
-    }  // namespace HWY_NAMESPACE
-  }  // namespace
-}  // namespace aoc25
-
-HWY_AFTER_NAMESPACE();
-
-#ifdef HWY_ONCE
-
 // Enable formatting of Eigen matrices.
 namespace aoc25 {
   namespace {
@@ -87,12 +60,6 @@ namespace fmt {
 namespace aoc25 {
 
   namespace {
-
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
-    }
 
     struct problem_t {
       std::vector<uint16_t> switches;
@@ -850,8 +817,9 @@ namespace aoc25 {
         static constexpr int first_constraint_row = 1;
 
         for (int offset = 0; offset < num_artificial_vars; ++offset) {
-          int const artifical_var_col = artificial_vars_begin + offset;
           int row = -1;
+
+          int const artifical_var_col = artificial_vars_begin + offset;
           [[maybe_unused]] auto const value =
               tableau_
                   .col(artifical_var_col)(
@@ -884,15 +852,10 @@ namespace aoc25 {
         // Restore original objective function.
         tableau_.row(0) = original_objective;
 
-        // TODO: Check that artificial variables are zero in solution. I.e. they must not be basic
-        // variables.
-
         // Ensure objective coeffients in columns of basic variables are zero.
         fix_basic_variable_objective_coeffs(tableau_);
 
         // Remove artificial variable columns from tableau.
-        // TODO: Benchmark this, if this is costly, just set columns to 0 instead.
-        // tableau_.middleCols(artificial_vars_begin, num_artificial_vars).setZero();
         tableau_.col(artificial_vars_begin) = tableau_.rightCols(1);
         tableau_.conservativeResize(Eigen::NoChange, tableau_.cols() - num_artificial_vars);
 
@@ -964,12 +927,12 @@ namespace aoc25 {
       }
     };
 
-    [[maybe_unused]] void find_num_pushes_impl(Eigen::VectorX<int16_t> const & base,
-                                               Eigen::MatrixX<int16_t> const & constraints,
-                                               Eigen::RowVectorX<int16_t> const & objective,
-                                               double & best_target_change,
-                                               uint64_t & branch_counter,
-                                               uint8_t log_indent) {
+    void find_num_pushes_impl(Eigen::VectorX<int16_t> const & base,
+                              Eigen::MatrixX<int16_t> const & constraints,
+                              Eigen::RowVectorX<int16_t> const & objective,
+                              double & best_target_change,
+                              uint64_t & branch_counter,
+                              uint8_t log_indent) {
       branch_counter += 1;
 
       // Run simplex to find optimal (floating point) solution.
@@ -1117,6 +1080,7 @@ namespace aoc25 {
     static constexpr size_t max_switches = 13;
     static constexpr combination_tables_t<max_switches> combination_tables;
 
+#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(8)
     for (auto const & problem : problems) {
       SPDLOG_DEBUG("Solving {} ({} switches)", problem, problem.switches.size());
       assert(problem.switches.size() <= max_switches);
@@ -1131,6 +1095,12 @@ namespace aoc25 {
       uint16_t state = 0;
 
       for (uint16_t idx = 0; (idx < table.size()); ++idx) {
+        // TODO: An option here would be to precompute all possible combo_diff values. These can
+        // then be used to compute a LUT for to the switch values. Since there's at most 13
+        // switches, and we know that combo_diff has exactly two bits set, that means a LUT of
+        // bin(13, 2) = 78 entries. In that case we do have to make sure that when transitioning
+        // from N to N + 1 bits set, we apply all required differences, such that we start with all
+        // the necessary switches toggled on.
         uint16_t const combo = table[idx];
         uint16_t const combo_diff = prev_combo ^ combo;  // Determine which bits changed.
         prev_combo = combo;
@@ -1154,10 +1124,9 @@ namespace aoc25 {
     auto const problems = parse_input(input);
     uint64_t total = 0;
 
-    // Around 40% speedup on work laptop.
-#  pragma omp parallel for reduction(+ : total) schedule(guided) num_threads(4)
+#pragma omp parallel for reduction(+ : total) schedule(guided) num_threads(4)
     for (auto const & problem : problems) {
-      // Obtain generator for all possible integer solution, with reduced number of free
+      // Obtain generator for all possible integer solutions, with reduced number of free
       // variables.
       SPDLOG_DEBUG("Solving {}", problem);
       auto [x_base, null_space] = generate_solution_system(problem);
@@ -1174,5 +1143,3 @@ namespace aoc25 {
   }
 
 }  // namespace aoc25
-
-#endif  // HWY_ONCE

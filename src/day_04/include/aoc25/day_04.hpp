@@ -4,7 +4,6 @@
 #include "aoc25/simd.hpp"
 
 #include <cstdint>
-#include <string_view>
 
 /*
  * --- Day 4: Printing Department ---

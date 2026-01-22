@@ -1,8 +1,9 @@
 #pragma once
 
 #include "aoc25/day.hpp"
+#include "aoc25/simd.hpp"
 
-#include <string_view>
+#include <cstdint>
 
 /*
  * --- Day 2: Gift Shop ---

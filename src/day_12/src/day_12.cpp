@@ -10,12 +10,8 @@
 #include <sys/types.h>
 
 #include <array>
-#include <bit>
 #include <cstdint>
-#include <numeric>
-#include <ranges>
 #include <stdexcept>
-#include <type_traits>
 
 namespace aoc25 {
   namespace {
@@ -170,7 +166,7 @@ namespace aoc25 {
   uint64_t day_t<12>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
     // Count number of '#' for each input. We know each present is 3x3, so it takes 5 lines to
     // describe it.
-    auto present_volumes = simd_vector_t<uint16_t>();
+    auto present_volumes = simd_vector_t<uint16_t>{};
     present_volumes.reserve(6);
 
     /* Total number of symbols per present description is:
@@ -187,7 +183,7 @@ namespace aoc25 {
     };
 
     while (are_next_lines_a_present()) {
-      auto const present_volume = num_hash_occurences(input);
+      size_t const present_volume = num_hash_occurences(input);
       present_volumes.push_back(present_volume);
       input.remove_prefix(present_desc_length);  // Jump to the next present.
     }

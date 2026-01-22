@@ -11,7 +11,6 @@
 
 #include <cstdint>
 #include <ranges>
-#include <unordered_map>
 #include <utility>
 
 #undef HWY_TARGET_INCLUDE

@@ -20,7 +20,7 @@
 namespace aoc25 {
   namespace {
 
-    [[maybe_unused]] uint64_t power_of_10(uint8_t exponent) {
+    uint64_t power_of_10(uint8_t exponent) {
       static constexpr auto table = std::to_array<uint64_t>({
           1,
           10,
@@ -37,13 +37,11 @@ namespace aoc25 {
       return table.at(exponent);
     }
 
-    [[maybe_unused]] uint64_t slice_msb_digits(uint64_t value, uint8_t digits_to_remove) {
+    uint64_t slice_msb_digits(uint64_t value, uint8_t digits_to_remove) {
       return value / power_of_10(digits_to_remove);
     }
 
-    [[maybe_unused]] uint64_t repeat_value(uint64_t value,
-                                           uint8_t value_width,
-                                           uint8_t target_width) {
+    uint64_t repeat_value(uint64_t value, uint8_t value_width, uint8_t target_width) {
       assert(target_width % value_width == 0);
       [[assume(target_width % value_width == 0)]];
       [[assume(value_width > 0 && value_width <= 5)]];
@@ -127,7 +125,7 @@ namespace aoc25 {
       return span_lut[num_digits];
     }
 
-    [[maybe_unused]] uint64_t any_repeated_digit_sum(uint64_t limit) {
+    uint64_t any_repeated_digit_sum(uint64_t limit) {
       if (limit == 0) {
         return 0;
       }
@@ -192,7 +190,7 @@ namespace aoc25 {
       return sum;
     }
 
-    [[maybe_unused]] uint64_t twice_repeated_digit_sum(uint64_t limit) {
+    uint64_t twice_repeated_digit_sum(uint64_t limit) {
       if (limit == 0) {
         return 0;
       }

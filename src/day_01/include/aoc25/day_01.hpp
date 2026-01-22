@@ -3,9 +3,6 @@
 #include "aoc25/day.hpp"
 #include "aoc25/simd.hpp"
 
-#include <span>
-#include <string_view>
-
 /*
  * --- Day 1: Secret Entrance ---
  *

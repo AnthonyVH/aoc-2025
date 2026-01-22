@@ -85,7 +85,7 @@ namespace aoc25 {
     namespace hn = hwy::HWY_NAMESPACE;
 
     // Based on: https://lemire.me/blog/2023/09/22/parsing-integers-quickly-with-avx-512/
-    [[maybe_unused]] inline hn::VFromD<hn::Full128<uint32_t>> parse_10e8_integer_simd_reverse(
+    inline hn::VFromD<hn::Full128<uint32_t>> parse_10e8_integer_simd_reverse(
         hn::VFromD<hn::Full256<uint8_t>> base10_8bit) {
       HWY_ALIGN static constexpr std::array<uint8_t, hn::Lanes(hn::Full256<uint8_t>{})>
           digit_value_base10e1 =
@@ -127,7 +127,7 @@ namespace aoc25 {
     /** @brief Converts a byte-packed decimal value into a 16-bit value. The packed bytes should
      * be stored with the least significant digit at the highest address.
      */
-    [[maybe_unused]] inline hn::VFromD<hn::Full128<uint16_t>> parse_10e4_integer_simd_reverse(
+    inline hn::VFromD<hn::Full128<uint16_t>> parse_10e4_integer_simd_reverse(
         hn::VFromD<hn::Full128<uint8_t>> base10_8bit) {
       // Unused digits are ignored by setting the corresponding multiplier to zero.
       HWY_ALIGN static constexpr std::array<uint16_t, hn::Lanes(hn::Full128<uint16_t>{})>
@@ -157,7 +157,7 @@ namespace aoc25 {
     void convert_single_uint64(simd_string_view_t input, CallbackFn && callback) {
       // Based on: https://lemire.me/blog/2023/09/22/parsing-integers-quickly-with-avx-512/
       // Maximum digits for uint64_t is 20 (18'446'744'073'709'551'615).
-      [[maybe_unused]] static constexpr uint8_t max_digits = 20;
+      static constexpr uint8_t max_digits = 20;
 
       auto const digit_count = input.size();
       assert((digit_count > 0) && (digit_count <= max_digits));
@@ -275,7 +275,7 @@ namespace aoc25 {
     void convert_single_uint16(simd_string_view_t input, CallbackFn && callback) {
       // Adapted from the convert_single_uint64() function.
       // Maximum digits for uint16_t is 5 (65'535).
-      [[maybe_unused]] static constexpr uint8_t max_digits = 5;
+      static constexpr uint8_t max_digits = 5;
 
       auto const digit_count = input.size();
       assert((digit_count > 0) && (digit_count <= max_digits));

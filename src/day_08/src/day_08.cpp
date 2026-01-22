@@ -1,12 +1,15 @@
 #include "aoc25/day_08.hpp"
 
 #include "aoc25/day.hpp"
+#include "aoc25/n_ary_tree.hpp"
 #include "aoc25/simd.hpp"
 #include "aoc25/string.hpp"
 
 #include <fmt/std.h>
 #include <hwy/base.h>
 #include <spdlog/spdlog.h>
+
+#include <omp.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -19,17 +22,18 @@
 namespace aoc25 {
   namespace {
 
-    /* Note: We use doubles instead of uint32_t here, because the result of a distance calculation
-     * requires more than 32 bits. Hence we need at minimum a 64-bit result. However, there's no
-     * proper 64-bit integer SIMD multiplication, so this must be done in floating point. And
-     * converting from integer to floating point is expensive. Plus if we start with 32-bit values
-     * we also have to expand the lane size, which means going from SSE to AVX2, which also costs a
-     * lot of time. So instead we just pay the extra memory cost and store coordinates as double.
+    /* Note: We use float instead of uint32_t here, because the result of a distance calculation
+     * requires more than 32 bits. However, the result fits in a float, and the loss of precision
+     * does not influence the result. Of course given different input this might fail...
+     *
+     * Also note that the squared distance does not fit into a float, i.e. we would need a double.
+     * Which stresses the cache much more and is slower than the just compare the square roots, but
+     * only store half as many bytes.
      */
     struct point_t {
-      double x;
-      double y;
-      double z;
+      float x;
+      float y;
+      float z;
 
       [[maybe_unused]] friend auto operator<(point_t const & lhs, point_t const & rhs) {
         return std::tie(lhs.x, lhs.y, lhs.z) < std::tie(rhs.x, rhs.y, rhs.z);
@@ -54,42 +58,42 @@ namespace aoc25 {
       size_t size() const { return x_.size(); }
       bool empty() const { return x_.empty(); }
 
-      void push_back(double x, double y, double z) {
+      void push_back(float x, float y, float z) {
         x_.push_back(x);
         y_.push_back(y);
         z_.push_back(z);
       }
 
-      double & x(size_t index) {
+      float & x(size_t index) {
         assert(index < x_.size());
         return x_[index];
       }
 
-      double x(size_t index) const {
+      float x(size_t index) const {
         assert(index < x_.size());
         return x_[index];
       }
 
-      double & y(size_t index) {
+      float & y(size_t index) {
         assert(index < y_.size());
         return y_[index];
       }
-      double y(size_t index) const {
+      float y(size_t index) const {
         assert(index < y_.size());
         return y_[index];
       }
-      double & z(size_t index) {
+      float & z(size_t index) {
         assert(index < z_.size());
         return z_[index];
       }
-      double z(size_t index) const {
+      float z(size_t index) const {
         assert(index < z_.size());
         return z_[index];
       }
 
-      simd_span_t<double const> x() const { return x_; }
-      simd_span_t<double const> y() const { return y_; }
-      simd_span_t<double const> z() const { return z_; }
+      simd_span_t<float const> x() const { return x_; }
+      simd_span_t<float const> y() const { return y_; }
+      simd_span_t<float const> z() const { return z_; }
 
       void erase(size_t index) {
         assert(index < x_.size());
@@ -105,9 +109,9 @@ namespace aoc25 {
       }
 
      private:
-      simd_vector_t<double> x_;
-      simd_vector_t<double> y_;
-      simd_vector_t<double> z_;
+      simd_vector_t<float> x_;
+      simd_vector_t<float> y_;
+      simd_vector_t<float> z_;
     };
 
     [[maybe_unused]] std::string format_as(points_t const & obj) {
@@ -139,12 +143,12 @@ namespace aoc25 {
 
       namespace hn = hwy::HWY_NAMESPACE;
 
-      void calculate_distances(point_t const & first_point,
-                               simd_span_t<double const> points_x,
-                               simd_span_t<double const> points_y,
-                               simd_span_t<double const> points_z,
-                               simd_span_t<double> distances_out) {
-        static constexpr auto tag = hn::ScalableTag<double>{};
+      void calculate_inverse_distances(point_t const & first_point,
+                                       simd_span_t<float const> points_x,
+                                       simd_span_t<float const> points_y,
+                                       simd_span_t<float const> points_z,
+                                       simd_span_t<float> distances_out) {
+        static constexpr auto tag = hn::ScalableTag<float>{};
         static constexpr size_t lanes = hn::Lanes(tag);
 
         assert(points_x.size() == points_y.size());
@@ -155,15 +159,15 @@ namespace aoc25 {
         auto const y_first = hn::Set(tag, first_point.y);
         auto const z_first = hn::Set(tag, first_point.z);
 
-        auto const * HWY_RESTRICT src_x = reinterpret_cast<double const *>(points_x.data());
-        auto const * HWY_RESTRICT src_y = reinterpret_cast<double const *>(points_y.data());
-        auto const * HWY_RESTRICT src_z = reinterpret_cast<double const *>(points_z.data());
+        auto const * HWY_RESTRICT src_x = points_x.data();
+        auto const * HWY_RESTRICT src_y = points_y.data();
+        auto const * HWY_RESTRICT src_z = points_z.data();
 
         size_t const num_points = points_x.size();
         size_t pos = 0;
 
-        auto const calculate_sum = [&](auto const & x_chunk, auto const & y_chunk,
-                                       auto const & z_chunk) {
+        auto const calculate_inv_dist = [&](auto const & x_chunk, auto const & y_chunk,
+                                            auto const & z_chunk) {
           auto const dx = hn::Sub(x_chunk, x_first);
           auto const dy = hn::Sub(y_chunk, y_first);
           auto const dz = hn::Sub(z_chunk, z_first);
@@ -172,7 +176,9 @@ namespace aoc25 {
           sum = hn::MulAdd(dy, dy, sum);
           sum = hn::MulAdd(dz, dz, sum);
 
-          return sum;
+          // This is faster than calculating the actual root, and only differs a tiny bit, which
+          // doesn't seem to affect finding the proper solution to the problems.
+          return hn::ApproximateReciprocalSqrt(sum);
         };
 
         for (; pos + lanes <= num_points; pos += lanes) {
@@ -180,8 +186,8 @@ namespace aoc25 {
           auto const y_chunk = hn::LoadU(tag, src_y + pos);
           auto const z_chunk = hn::LoadU(tag, src_z + pos);
 
-          auto const sum = calculate_sum(x_chunk, y_chunk, z_chunk);
-          hn::Store(sum, tag, distances_out.data() + pos);
+          auto const sum = calculate_inv_dist(x_chunk, y_chunk, z_chunk);
+          hn::StoreU(sum, tag, distances_out.data() + pos);
         }
 
         if (pos < num_points) {  // Handle last partial chunk.
@@ -192,16 +198,107 @@ namespace aoc25 {
           auto const y_chunk = hn::LoadN(tag, src_y + pos, lanes_remaining);
           auto const z_chunk = hn::LoadN(tag, src_z + pos, lanes_remaining);
 
-          auto const sum = calculate_sum(x_chunk, y_chunk, z_chunk);
+          auto const sum = calculate_inv_dist(x_chunk, y_chunk, z_chunk);
           hn::StoreN(sum, tag, distances_out.data() + pos, lanes_remaining);
         }
       }
 
-      void update_distances(simd_span_t<double> prev_dist,
+      size_t calculate_limited_distances(point_t const & first_point,
+                                         simd_span_t<float const> points_x,
+                                         simd_span_t<float const> points_y,
+                                         simd_span_t<float const> points_z,
+                                         simd_span_t<float> distances_out,
+                                         uint16_t & idx_b_flags_out,
+                                         float max_distance) {
+        using flags_t = std::remove_cvref_t<decltype(idx_b_flags_out)>;
+
+        static constexpr auto tag = hn::ScalableTag<float>{};
+        static constexpr size_t lanes = hn::Lanes(tag);
+        [[maybe_unused]] static constexpr size_t bits_per_flag_word = sizeof(flags_t) * 8;
+
+        assert(points_x.size() == points_y.size());
+        assert(points_x.size() == points_z.size());
+        assert(points_x.size() == distances_out.size());
+
+        auto const x_first = hn::Set(tag, first_point.x);
+        auto const y_first = hn::Set(tag, first_point.y);
+        auto const z_first = hn::Set(tag, first_point.z);
+
+        auto const max_dist = hn::Set(tag, max_distance);
+
+        auto const * const HWY_RESTRICT src_x = points_x.data();
+        auto const * const HWY_RESTRICT src_y = points_y.data();
+        auto const * const HWY_RESTRICT src_z = points_z.data();
+
+        auto * const HWY_RESTRICT dist_ptr = distances_out.data();
+
+        size_t const num_points = points_x.size();
+        assert(num_points <= bits_per_flag_word);  // All flags fit in a single word.
+
+        size_t in_pos = 0;
+        size_t out_pos = 0;
+        flags_t idx_b_flags = 0;
+
+        auto const calculate_dist = [&](auto const & x_chunk, auto const & y_chunk,
+                                        auto const & z_chunk) {
+          auto const dx = hn::Sub(x_chunk, x_first);
+          auto const dy = hn::Sub(y_chunk, y_first);
+          auto const dz = hn::Sub(z_chunk, z_first);
+
+          auto sum = hn::Mul(dx, dx);
+          sum = hn::MulAdd(dy, dy, sum);
+          sum = hn::MulAdd(dz, dz, sum);
+
+          // This is faster than calculating the actual root, and only differs a tiny bit, which
+          // doesn't seem to affect finding the proper solution to the problems.
+          return hn::ApproximateReciprocalSqrt(sum);
+        };
+
+        auto const update_flags = [&](auto const & mask) {
+          flags_t const new_flags =
+              static_cast<flags_t>(hn::BitsFromMask(tag, mask)) & ((1 << lanes) - 1);
+          idx_b_flags |= new_flags << in_pos;
+        };
+
+        for (; in_pos + lanes <= num_points; in_pos += lanes) {
+          auto const x_chunk = hn::LoadU(tag, src_x + in_pos);
+          auto const y_chunk = hn::LoadU(tag, src_y + in_pos);
+          auto const z_chunk = hn::LoadU(tag, src_z + in_pos);
+
+          auto const sum = calculate_dist(x_chunk, y_chunk, z_chunk);
+          auto const below_max = hn::Ge(sum, max_dist);  // Distance is actually 1 / dist.
+
+          out_pos += hn::CompressStore(sum, below_max, tag, dist_ptr + out_pos);
+          update_flags(below_max);
+        }
+
+        if (in_pos < num_points) {  // Handle last partial chunk.
+          size_t const lanes_remaining = num_points - in_pos;
+          assert(in_pos + lanes_remaining == num_points);
+          auto const mask = hn::FirstN(tag, lanes_remaining);
+
+          auto const x_chunk = hn::MaskedLoad(mask, tag, src_x + in_pos);
+          auto const y_chunk = hn::MaskedLoad(mask, tag, src_y + in_pos);
+          auto const z_chunk = hn::MaskedLoad(mask, tag, src_z + in_pos);
+
+          auto const sum = calculate_dist(x_chunk, y_chunk, z_chunk);
+          auto const below_max = hn::MaskedGe(mask, sum, max_dist);
+
+          out_pos += hn::CompressStore(sum, below_max, tag, dist_ptr + out_pos);
+          update_flags(below_max);
+        }
+
+        // All flags fit into a single word.
+        idx_b_flags_out = idx_b_flags;
+
+        return out_pos;
+      }
+
+      void update_distances(simd_span_t<float> prev_dist,
                             simd_span_t<uint32_t> prev_target_idx,
-                            simd_span_t<double const> new_dist,
+                            simd_span_t<float const> new_dist,
                             uint32_t new_target_idx) {
-        static constexpr auto dist_tag = hn::ScalableTag<double>{};
+        static constexpr auto dist_tag = hn::ScalableTag<float>{};
         static constexpr size_t lanes = hn::Lanes(dist_tag);
         static constexpr auto idx_tag = hn::FixedTag<uint32_t, lanes>{};
 
@@ -209,103 +306,45 @@ namespace aoc25 {
         assert(prev_target_idx.size() == prev_dist.size());
         assert(prev_target_idx.size() == new_dist.size());
 
+        size_t const num_points = new_dist.size();
         auto const target_idx = hn::Set(idx_tag, new_target_idx);
-
-        size_t pos = 0;
 
         // Ensure inputs are aligned.
         assert(reinterpret_cast<uintptr_t>(new_dist.data()) % lanes == 0);
         assert(reinterpret_cast<uintptr_t>(prev_dist.data()) % lanes == 0);
 
-        for (; pos + lanes <= new_dist.size(); pos += lanes) {
+        float * const HWY_RESTRICT prev_ptr = prev_dist.data();
+        float const * const HWY_RESTRICT new_ptr = new_dist.data();
+        uint32_t * const HWY_RESTRICT prev_target_ptr = prev_target_idx.data();
+
+        size_t pos = 0;
+
+        // NOTE: Using > instead of <, because the values are 1 / distance. So a larger value is
+        // actually a smaller distance.
+
+        for (; pos + lanes <= num_points; pos += lanes) {
           // Note: Loading 2 chunks at a time, combining the masks, and then processing a
           // double-width chunk of indices is not faster.
-          auto const new_chunk = hn::Load(dist_tag, new_dist.data() + pos);
-          auto const prev_chunk = hn::Load(dist_tag, prev_dist.data() + pos);
-          auto const use_new = hn::Lt(new_chunk, prev_chunk);
+          auto const new_chunk = hn::Load(dist_tag, new_ptr + pos);
+          auto const prev_chunk = hn::Load(dist_tag, prev_ptr + pos);
+          auto const use_new = hn::Gt(new_chunk, prev_chunk);
 
-          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_dist.data() + pos);
-          hn::BlendedStore(target_idx, hn::DemoteMaskTo(idx_tag, dist_tag, use_new), idx_tag,
-                           prev_target_idx.data() + pos);
+          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_ptr + pos);
+          hn::BlendedStore(target_idx, hn::RebindMask(idx_tag, use_new), idx_tag,
+                           prev_target_ptr + pos);
         }
 
-        if (pos < new_dist.size()) {  // Handle last partial chunk.
-          size_t const lanes_remaining = new_dist.size() - pos;
-          assert(pos + lanes_remaining == new_dist.size());
+        if (pos < num_points) {  // Handle last partial chunk.
+          size_t const lanes_remaining = num_points - pos;
+          assert(pos + lanes_remaining == num_points);
 
-          auto const new_chunk = hn::LoadN(dist_tag, new_dist.data() + pos, lanes_remaining);
-          auto const prev_chunk = hn::LoadN(dist_tag, prev_dist.data() + pos, lanes_remaining);
-          auto const use_new = hn::Lt(new_chunk, prev_chunk);
+          auto const new_chunk = hn::LoadN(dist_tag, new_ptr + pos, lanes_remaining);
+          auto const prev_chunk = hn::LoadN(dist_tag, prev_ptr + pos, lanes_remaining);
+          auto const use_new = hn::Gt(new_chunk, prev_chunk);
 
-          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_dist.data() + pos);
-
-          hn::BlendedStore(target_idx, hn::DemoteMaskTo(idx_tag, dist_tag, use_new), idx_tag,
-                           prev_target_idx.data() + pos);
-        }
-      }
-
-      // Note: See call-site for an explanation why this single template argument is used.
-      template <class SiftDownArgs>
-      void sift_down_with_aux(SiftDownArgs args) {
-        using key_t = std::remove_cvref_t<decltype(args.keys.front())>;
-        using value_t = std::remove_cvref_t<decltype(args.values.front())>;
-
-        static constexpr size_t branching_factor = SiftDownArgs::branching_factor;
-        static constexpr auto tag = hn::FixedTag<key_t, branching_factor>{};
-
-        static_assert(std::is_arithmetic_v<key_t>);
-        static_assert((branching_factor == 2) || (branching_factor == 4),
-                      "Comparison code requires branching factor of 2 or 4");
-
-        size_t const size = args.keys.size();
-        key_t * HWY_RESTRICT key_ptr = args.keys.data();
-        value_t * HWY_RESTRICT value_ptr = args.values.data();
-        size_t pos = args.pos;
-
-        while (true) {
-          size_t const first_child = branching_factor * pos + 1;
-          size_t const last_child = first_child + branching_factor - 1;
-
-          if (first_child >= size) {
-            break;  // No children exist.
-          }
-
-          size_t best_child = 0xDEAD'BEEF;
-
-          if (last_child < size) {  // Handle all children using SIMD.
-            auto const child_keys = hn::LoadU(tag, key_ptr + first_child);
-
-            // Prefetch children of first current child.
-            hwy::Prefetch(key_ptr + branching_factor * first_child + 1);
-
-            // Calculate max such that each lane contains the max key among all children.
-            auto const max = hn::MaxOfLanes(tag, child_keys);
-
-            if (hn::GetLane(max) <= key_ptr[pos]) {
-              break;
-            }
-
-            // Find which child has the max key.
-            auto const is_max = hn::Eq(child_keys, max);
-            best_child = first_child + std::countr_zero(hn::BitsFromMask(tag, is_max));
-          } else {  // Fall back to scalar code for the last incomplete group.
-            best_child = first_child;
-
-            for (size_t child = first_child + 1; child < size; ++child) {
-              best_child = (key_ptr[child] > key_ptr[best_child]) ? child : best_child;
-            }
-
-            if (key_ptr[best_child] <= key_ptr[pos]) {
-              break;
-            }
-          }
-
-          // Keep key and value position synchronized.
-          using std::swap;
-          swap(key_ptr[pos], key_ptr[best_child]);
-          swap(value_ptr[pos], value_ptr[best_child]);
-
-          pos = best_child;
+          hn::BlendedStore(new_chunk, use_new, dist_tag, prev_ptr + pos);
+          hn::BlendedStore(target_idx, hn::RebindMask(idx_tag, use_new), idx_tag,
+                           prev_target_ptr + pos);
         }
       }
 
@@ -318,47 +357,37 @@ HWY_AFTER_NAMESPACE();
 #ifdef HWY_ONCE
 
 namespace aoc25 {
-
   namespace {
 
-    void calculate_distances(point_t const & first_point,
-                             simd_span_t<double const> points_x,
-                             simd_span_t<double const> points_y,
-                             simd_span_t<double const> points_z,
-                             simd_span_t<double> distances_out) {
-      HWY_EXPORT(calculate_distances);
-      return HWY_DYNAMIC_DISPATCH(calculate_distances)(first_point, points_x, points_y, points_z,
-                                                       distances_out);
+    void calculate_inverse_distances(point_t const & first_point,
+                                     simd_span_t<float const> points_x,
+                                     simd_span_t<float const> points_y,
+                                     simd_span_t<float const> points_z,
+                                     simd_span_t<float> distances_out) {
+      HWY_EXPORT(calculate_inverse_distances);
+      return HWY_DYNAMIC_DISPATCH(calculate_inverse_distances)(first_point, points_x, points_y,
+                                                               points_z, distances_out);
     }
 
-    void update_distances(simd_span_t<double> prev_distances,
+    size_t calculate_limited_distances(point_t const & first_point,
+                                       simd_span_t<float const> points_x,
+                                       simd_span_t<float const> points_y,
+                                       simd_span_t<float const> points_z,
+                                       simd_span_t<float> distances_out,
+                                       uint16_t & idx_b_flags_out,
+                                       float max_distance) {
+      HWY_EXPORT(calculate_limited_distances);
+      return HWY_DYNAMIC_DISPATCH(calculate_limited_distances)(
+          first_point, points_x, points_y, points_z, distances_out, idx_b_flags_out, max_distance);
+    }
+
+    void update_distances(simd_span_t<float> prev_distances,
                           simd_span_t<uint32_t> prev_target_idx,
-                          simd_span_t<double const> new_distances,
+                          simd_span_t<float const> new_distances,
                           uint32_t new_target_idx) {
       HWY_EXPORT(update_distances);
       return HWY_DYNAMIC_DISPATCH(update_distances)(prev_distances, prev_target_idx, new_distances,
                                                     new_target_idx);
-    }
-
-    /* Google Highway does not support creating dispatch tables to functions with more than one
-     * template argument. Hence we cheat by bundling all template arguments into a single struct,
-     * and unpacking it again inside the function that gets dispatched to.
-     */
-    template <size_t BranchingFactor, class Key, class Value>
-    struct sift_down_with_aux_args_t {
-      static constexpr size_t branching_factor = BranchingFactor;
-
-      simd_span_t<Key> keys;
-      std::span<Value> values;
-      size_t pos;
-    };
-
-    template <size_t BranchingFactor, class Key, class Value>
-    [[maybe_unused]] void sift_down_with_aux(simd_span_t<Key> keys,
-                                             std::span<Value> values,
-                                             size_t pos) {
-      using args_t = sift_down_with_aux_args_t<BranchingFactor, Key, Value>;
-      HWY_EXPORT_AND_DYNAMIC_DISPATCH_T(sift_down_with_aux<args_t>)(args_t{keys, values, pos});
     }
 
     struct disjoint_set_t {
@@ -388,19 +417,18 @@ namespace aoc25 {
           return std::nullopt;
         }
 
-        auto [small_idx, large_idx] = std::minmax(root_a, root_b, [&](uint16_t lhs, uint16_t rhs) {
-          return size_.at(lhs) < size_.at(rhs);
-        });
+        auto [small_idx, large_idx] = std::minmax(
+            root_a, root_b, [&](uint16_t lhs, uint16_t rhs) { return size_[lhs] < size_[rhs]; });
 
-        parent_.at(small_idx) = large_idx;
-        size_.at(large_idx) += size_.at(small_idx);
-        size_.at(small_idx) = 0;  // Clear, so we can find max values later.
-        return size_.at(large_idx);
+        parent_[small_idx] = large_idx;
+        size_[large_idx] += size_[small_idx];
+        size_[small_idx] = 0;  // Clear, so we can find max values later.
+        return size_[large_idx];
       }
 
       uint16_t size(uint16_t item) const { return size_.at(find(item)); }
 
-      std::vector<uint16_t> sizes() const && { return std::move(size_); }
+      std::vector<uint16_t> extract_sizes() const && { return std::move(size_); }
 
      private:
       mutable std::vector<uint16_t> parent_;
@@ -466,12 +494,12 @@ namespace aoc25 {
         return idx_b_[index];
       }
 
-      double & distance(size_t index) {
+      float & distance(size_t index) {
         assert(index < distances_.size());
         return distances_[index];
       }
 
-      double distance(size_t index) const {
+      float distance(size_t index) const {
         assert(index < distances_.size());
         return distances_[index];
       }
@@ -488,10 +516,10 @@ namespace aoc25 {
       simd_span_t<uint32_t> idx_b() { return idx_b_; }
       simd_span_t<uint32_t const> idx_b() const { return idx_b_; }
 
-      simd_span_t<double> distances() { return distances_; }
-      simd_span_t<double const> distances() const { return distances_; }
+      simd_span_t<float> distances() { return distances_; }
+      simd_span_t<float const> distances() const { return distances_; }
 
-      void push_back(uint32_t idx_a, uint32_t idx_b, double distance) {
+      void push_back(uint32_t idx_a, uint32_t idx_b, float distance) {
         idx_a_.push_back(idx_a);
         idx_b_.push_back(idx_b);
         distances_.push_back(distance);
@@ -512,10 +540,10 @@ namespace aoc25 {
 
      private:
       // Indices are 32 bit, because there's no proper 16-bit SIMD instructions.
-      // Distances are double, because there's no proper 64-bit integer SIMD multiplications.
+      // Distances are float, because there's no proper 64-bit integer SIMD multiplications.
       simd_vector_t<uint32_t> idx_a_;
       simd_vector_t<uint32_t> idx_b_;
-      simd_vector_t<double> distances_;
+      simd_vector_t<float> distances_;
     };
 
     [[maybe_unused]] std::string format_as(distances_t const & obj) {
@@ -527,228 +555,152 @@ namespace aoc25 {
                                       }));
     }
 
-    /** @brief An N-ary max tree with a maximum size.
-     *
-     * The tree is builds a max-tree of up the given number of elements. New elements can be pushed
-     * using push_or_replace(), which either adds the new element (if the tree is not full), or
-     * replaces the current maximum (if the tree is full and the new element is smaller than the
-     * current maximum). This allows keeping track of the "best N" elements seen so far.
-     */
-    template <class Key, class Value, size_t BranchingFactor>
-      requires std::is_arithmetic_v<Key>
-    class sized_n_ary_max_tree_t {
-     public:
-      struct element_t {
-        Key key;
-        Value value;
-      };
-
-      struct element_ref_t {
-        Key const & key;
-        Value const & value;
-      };
-
-      explicit sized_n_ary_max_tree_t(size_t max_size)
-          : keys_{}, values_{}, current_size_{0}, max_size_{max_size} {
-        keys_.reserve(max_size_);
-        values_.reserve(max_size_);
-      }
-
-      void push(element_t elem) {
-        assert(current_size_ < max_size_);
-        keys_.push_back(elem.key);
-        values_.push_back(std::move(elem.value));
-        sift_up(current_size_++);
-      }
-
-      /**
-       * @brief Inserts a value or replaces the max:
-       *   - If heap is not full, push the new value normally.
-       *   - If heap is full AND (new_value < current max), replace root and sift down.
-       *   - Otherwise, do nothing (new value is too large to enter the "best X" set).
-       */
-      void push_or_replace(element_t elem) {
-        if (current_size_ < max_size_) {
-          push(std::move(elem));
-        } else if (is_higher_in_heap(keys_[0], elem.key)) {
-          keys_[0] = elem.key;
-          values_[0] = std::move(elem.value);
-          sift_down(0);
-        }
-      }
-
-      element_t pop() {
-        assert(current_size_ != 0);
-        auto result = element_t{.key = keys_[0], .value = std::move(values_[0])};
-
-        if (current_size_-- >= 2) {
-          keys_[0] = keys_[current_size_];
-          values_[0] = std::move(values_[current_size_]);
-          sift_down(0);
-        }
-
-        keys_.pop_back();
-        values_.pop_back();
-
-        return result;
-      }
-
-      element_ref_t top() const {
-        assert(current_size_ > 0);
-        return element_ref_t{.key = keys_[0], .value = values_[0]};
-      }
-
-      size_t size() const { return current_size_; }
-
-      // Allow iterating over all the elements without popping them off.
-      auto keys_begin() const { return keys_.begin(); }
-      auto keys_end() const { return keys_.begin() + current_size_; }
-
-      auto values_begin() const { return values_.begin(); }
-      auto values_end() const { return values_.begin() + current_size_; }
-
-      std::span<Key const> keys() const { return keys_; }
-      std::span<Value const> values() const { return values_; }
-
-      std::vector<Value> extract_values() && { return std::move(values_); }
-
-     private:
-      static constexpr size_t branching_factor = BranchingFactor;
-
-      simd_vector_t<Key> keys_;
-      std::vector<Value> values_;
-      size_t current_size_;
-      size_t max_size_;
-
-      bool is_higher_in_heap(Key const & lhs, Key const & rhs) const {
-        // By inverting the order of rhs and lhs, std::less creates a max-heap, which is the same
-        // behavior as STL.
-        return rhs < lhs;
-      }
-
-      void sift_up(size_t pos) {
-        while (pos > 0) {
-          size_t parent = (pos - 1) / branching_factor;
-          if (!is_higher_in_heap(keys_[pos], keys_[parent])) {
-            break;
-          }
-
-          using std::swap;
-          swap(keys_[pos], keys_[parent]);
-          swap(values_[pos], values_[parent]);
-          pos = parent;
-        }
-      }
-
-      void sift_down(size_t pos) {
-        if constexpr ((branching_factor == 2) || (branching_factor == 4)) {
-          sift_down_with_aux<branching_factor>(simd_span_t{keys_}, std::span{values_}, pos);
-        } else {
-          sift_down_scalar(pos);
-        }
-      }
-
-      [[maybe_unused]] void sift_down_scalar(size_t pos) {
-        while (true) {
-          size_t first_child = branching_factor * pos + 1;
-          if (first_child >= current_size_) {
-            break;
-          }
-
-          // Find the best among up to branching_factor children.
-          size_t best_child = first_child;
-          size_t end_child = std::min(first_child + branching_factor, current_size_);
-
-          for (size_t child = first_child + 1; child < end_child; ++child) {
-            best_child = (is_higher_in_heap(keys_[child], keys_[best_child])) ? child : best_child;
-          }
-
-          if (!is_higher_in_heap(keys_[best_child], keys_[pos])) {
-            break;
-          }
-
-          using std::swap;
-          swap(keys_[pos], keys_[best_child]);
-          swap(values_[pos], values_[best_child]);
-          pos = best_child;
-        }
-      }
-    };
-
     struct connection_idx_t {
       uint16_t idx_a;
       uint16_t idx_b;
     };
 
+    [[maybe_unused]] std::string format_as(connection_idx_t const & obj) {
+      return fmt::format("[{} - {}]", obj.idx_a, obj.idx_b);
+    }
+
+    using tree_t = aoc25::sized_n_ary_min_tree_t<float, connection_idx_t, 4>;
+
+    void push_elements_to_tree(tree_t & tree,
+                               std::span<float const> distances,
+                               std::span<uint16_t const> idxes_a,
+                               std::span<uint16_t const> idx_b_flags,
+                               uint16_t const b_offset) {
+      assert(idxes_a.size() == idx_b_flags.size());
+      uint16_t const num_idx_a = idxes_a.size();
+      uint16_t dist_idx = 0;
+
+      for (uint16_t idx_pos = 0; idx_pos < num_idx_a; ++idx_pos) {
+        uint16_t const idx_a = idxes_a[idx_pos];
+        uint16_t const idx_b_begin = idx_a + b_offset;
+        uint16_t idx_b_flag = idx_b_flags[idx_pos];
+        SPDLOG_TRACE("  idx_pos: {}, idx_a: {}, idx_b_flag: {:016b}", idx_pos, idx_a, idx_b_flag);
+
+        while (idx_b_flag != 0) {
+          uint16_t const b_step = std::countr_zero(idx_b_flag);
+          idx_b_flag &= idx_b_flag - 1;  // Clear lowest set bit.
+
+          // Distances are already pre-filtered by SIMD, so they are all better than whatever the
+          // worst distance in the tree at the start of this function was.
+          using element_t = typename tree_t::element_t;
+          tree.push_or_replace(element_t{
+              .key = distances[dist_idx++],
+              .value =
+                  connection_idx_t{
+                      .idx_a = idx_a,
+                      .idx_b = static_cast<uint16_t>(idx_b_begin + b_step),
+                  },
+          });
+        }
+      }
+    }
+
     std::vector<connection_idx_t> calculate_n_shortest_distances(points_t const & points,
                                                                  size_t num_distances) {
-      // Calculate all pairwise distances, and keep track of the shortest N ones.
-      auto result = sized_n_ary_max_tree_t<double, connection_idx_t, 4>(num_distances);
-      using push_t = typename decltype(result)::element_t;
+      auto result = tree_t(num_distances);
 
-      // Prime with 1 element of maximum distance, so we can always check against largest distance.
-      result.push(push_t{
-          .key = std::numeric_limits<double>::infinity(),
-          .value = connection_idx_t{0, 0},
-      });
-      auto & max_accepted_dist = result.top().key;
+      [[maybe_unused]] uint16_t const num_points = points.size();  // Ensure this is cached.
 
-      uint16_t const num_points = points.size();  // Because this doesn't seem to get cached.
-      [[maybe_unused]] uint32_t num_calc_skipped = 0;
+      // The main slowdown is calculating way too many distances. If the point cloud is more or
+      // less uniformly distributed in space, then most distances will be large. Hence we only
+      // need a few distances around each point. So instead of calculating all distances from a
+      // point A, and then advancing to A + 1, we calculate a handful of distances from each A.
+      // Each time this handful of distances is calculated, we update an the maximum accepted
+      // distance. This way we can skip almost all distance calculations, assuming a uniform
+      // distribution.
+      static uint16_t constexpr b_step = 16;
+      size_t const chunk_size = num_points * b_step;
 
-      // Calculate a chunk of distances at a time.
-      static constexpr size_t max_chunk_size = 32;  // Found by trying out various sizes.
-      auto distance_chunk = simd_vector_t<double>(max_chunk_size);
+      float min_accepted_recip_dist = 0;
 
-      for (uint16_t idx_a = 0; idx_a < num_points - 1; ++idx_a) {
-        auto const point_a = point_t{
-            .x = points.x(idx_a),
-            .y = points.y(idx_a),
-            .z = points.z(idx_a),
-        };
+      std::vector<uint16_t> idxes_a =
+          std::views::iota(static_cast<uint16_t>(0u), static_cast<uint16_t>(num_points - 1)) |
+          std::ranges::to<std::vector>();
 
-        uint16_t idx_b = idx_a + 1;
+      [[maybe_unused]] size_t num_calc_stored = 0;
 
-        auto const process_distance_chunk = [&](size_t chunk_size) -> bool {
-          auto const x_b = points.x().subspan(idx_b, chunk_size);
-          auto const y_b = points.y().subspan(idx_b, chunk_size);
-          auto const z_b = points.z().subspan(idx_b, chunk_size);
+      auto distance_chunk = simd_vector_t<float>(chunk_size);
+      auto idx_b_flags = std::vector<uint16_t>(num_points);
 
-          // If X-distance is already too large, skip the entire chunk.
-          if (auto const dx = point_a.x - x_b[0]; dx * dx >= max_accepted_dist) {
-            return false;  // Since points are sorted, we can't obtain any closer distances.
-          }
+      for (uint16_t b_offset = 1; !idxes_a.empty() && (b_offset < num_points); b_offset += b_step) {
+        size_t dist_pos = 0;
+        size_t idx_a_pos = 0;
 
-          auto dist_out = simd_span_t{distance_chunk}.subspan(0, chunk_size);
-          calculate_distances(point_a, x_b, y_b, z_b, dist_out);
+        // Calculate the reciprocal of the reciprocal here, so we don't have to do a 1 / dist
+        // calculation inside the loop.
+        auto const max_accepted_dist = 1 / min_accepted_recip_dist;
 
-          return true;
-        };
+        for (uint16_t const idx_a : idxes_a) {
+          auto const point_a = point_t{
+              .x = points.x(idx_a),
+              .y = points.y(idx_a),
+              .z = points.z(idx_a),
+          };
 
-        for (; idx_b < num_points; idx_b += max_chunk_size) {
-          auto const chunk_size = std::min<size_t>(num_points - idx_b, max_chunk_size);
-          bool const continue_processing = process_distance_chunk(chunk_size);
+          int16_t const idx_b_begin = idx_a + b_offset;
+          int16_t const num_b = std::min<int16_t>(b_step, num_points - idx_b_begin);
 
-          if (!continue_processing) {
-            num_calc_skipped += num_points - idx_b;
+          if (num_b <= 0) {
+            // Indices are sorted, so no more distances to calculate in next iterations.
+            SPDLOG_TRACE("No more distances to calculate from point {} onwards", idx_a);
             break;
           }
 
-          // Push distances to heap.
-          for (size_t dist_idx = 0; dist_idx < chunk_size; ++dist_idx) {
-            auto const distance = distance_chunk[dist_idx];
-            result.push_or_replace(push_t{
-                .key = distance,
-                .value = connection_idx_t{idx_a, static_cast<uint16_t>(idx_b + dist_idx)},
-            });
+          auto const x_b = points.x().subspan(idx_b_begin, num_b);
+          auto const y_b = points.y().subspan(idx_b_begin, num_b);
+          auto const z_b = points.z().subspan(idx_b_begin, num_b);
+
+          if (auto const diff_x = std::abs(point_a.x - x_b[0]); diff_x >= max_accepted_dist) {
+            SPDLOG_TRACE("Skipping all distances from point {}", idx_a);
+            continue;  // Since points are sorted, we can't obtain any closer distances.
           }
+
+          SPDLOG_TRACE("Calculating distances from point {} to ({}, {}] (#: {})", , idx_a,
+                       idx_b_begin, idx_b_begin + num_b, num_b);
+
+          auto local_dist_chunk = simd_span_t{distance_chunk}.subspan(dist_pos, num_b);
+          dist_pos += calculate_limited_distances(point_a, x_b, y_b, z_b, local_dist_chunk,
+                                                  idx_b_flags[idx_a_pos], min_accepted_recip_dist);
+
+          // Even if num_new_dist, current point might still generate viable distances later.
+          idxes_a[idx_a_pos++] = idx_a;
+        }
+
+        idxes_a.resize(idx_a_pos);  // Keep only points that need further distance calculations.
+        idx_b_flags.resize(idx_a_pos);
+        SPDLOG_TRACE("# idxes_a: {}, idxes_a: {}", idxes_a.size(), idxes_a);
+
+#  ifndef NDEBUG
+        num_calc_stored += dist_pos;
+        SPDLOG_DEBUG("b_offset: {}, {} distances from {} points", b_offset, dist_pos, idx_a_pos);
+#  endif
+
+        if (dist_pos > 0) {  // Merge distances from this chunk into result.
+          // Note: It's faster just to try and push everything, than to do an nth_element on the
+          // distances first.
+          auto const new_distances = std::span<float const>{distance_chunk}.first(dist_pos);
+
+          push_elements_to_tree(result, new_distances, idxes_a, idx_b_flags, b_offset);
+          SPDLOG_TRACE("Tree keys after push: {}", std::span<float const>{result.keys()});
+
+          assert(result.size() == num_distances);
+          min_accepted_recip_dist = result.top().key;
+          SPDLOG_DEBUG("  Updated min_accepted_recip_dist: {}", min_accepted_recip_dist);
         }
       }
 
+#  ifndef NDEBUG
       [[maybe_unused]] size_t const num_max_calculations = num_points * (num_points - 1) / 2;
-      SPDLOG_DEBUG("Skipped {:.0f}% ({} / {}) distance calculations",
-                   (100.0 * num_calc_skipped) / num_max_calculations, num_calc_skipped,
+      SPDLOG_DEBUG("Stored {:.0f}% ({} / {}) distance calculations",
+                   (100.0 * num_calc_stored) / num_max_calculations, num_calc_stored,
                    num_max_calculations);
+#  endif
+
       return std::move(result).extract_values();
     }
 
@@ -783,11 +735,11 @@ namespace aoc25 {
 
     for (auto const & idxes : distances_idxes) {
       [[maybe_unused]] auto const new_size = circuit_sets.merge(idxes.idx_a, idxes.idx_b);
-      SPDLOG_DEBUG("Connected {:3d} & {:3d}, group size: {}", idxes.idx_a, idxes.idx_b, new_size);
+      SPDLOG_TRACE("Connected {:3d} & {:3d}, group size: {}", idxes.idx_a, idxes.idx_b, new_size);
     }
 
     // No need to sort, just find the largest 3 circuits.
-    auto circuit_sizes = std::move(circuit_sets).sizes();
+    auto circuit_sizes = std::move(circuit_sets).extract_sizes();
     std::ranges::nth_element(circuit_sizes, circuit_sizes.begin() + 3, std::greater{});
     auto const largest_circuits = std::span(circuit_sizes).first(3);
 
@@ -835,26 +787,27 @@ namespace aoc25 {
       std::ranges::fill(shortest_distances.idx_b(), first_point_idx);
 
       // Calculate all distances from the first point to all others.
-      simd_span_t<double const> const points_x = points.x().subspan(0, points.size() - 1);
-      simd_span_t<double const> const points_y = points.y().subspan(0, points.size() - 1);
-      simd_span_t<double const> const points_z = points.z().subspan(0, points.size() - 1);
+      simd_span_t<float const> const points_x = points.x().first(points.size() - 1);
+      simd_span_t<float const> const points_y = points.y().first(points.size() - 1);
+      simd_span_t<float const> const points_z = points.z().first(points.size() - 1);
 
-      calculate_distances(first_point, points_x, points_y, points_z,
-                          shortest_distances.distances());
+      calculate_inverse_distances(first_point, points_x, points_y, points_z,
+                                  shortest_distances.distances());
 
       // Remove the first point from remaining points.
       remaining_points.erase(first_point_idx);
     }
 
     // Scratch area for newly calculated distances.
-    simd_vector_t<double> new_distances;
+    simd_vector_t<float> new_distances;
 
     for (uint16_t num_connections = 0; num_connections < points.size() - 1; ++num_connections) {
-      // Find the shortest distance in the list.
+      // Find the shortest distance in the list (note that we find the maximum, since the values
+      // stored are actualy 1 / distance, since that's cheaper to compute).
       auto const min_pos =
-          aoc25::find_minimum_pos(simd_span_t<double const>{shortest_distances.distances()});
+          aoc25::find_maximum_pos(simd_span_t<float const>{shortest_distances.distances()});
 
-      SPDLOG_DEBUG("Connection # {}: {} & {}, distance: {}", num_connections + 1,
+      SPDLOG_TRACE("Connection # {}: {} & {}, distance: {}", num_connections + 1,
                    shortest_distances.idx_a(min_pos), shortest_distances.idx_b(min_pos),
                    shortest_distances.distance(min_pos));
 
@@ -864,7 +817,7 @@ namespace aoc25 {
         auto const & x_b = points.x(shortest_distances.idx_b(min_pos));
         SPDLOG_DEBUG("Last connected points at x: {} & {}", x_a, x_b);
 
-        return x_a * x_b;
+        return static_cast<uint64_t>(x_a) * static_cast<uint64_t>(x_b);
       }
 
       auto const new_connected_idx = shortest_distances.idx_a(min_pos);
@@ -882,8 +835,8 @@ namespace aoc25 {
         };
 
         new_distances.resize(remaining_points.size());
-        calculate_distances(new_point, remaining_points.x(), remaining_points.y(),
-                            remaining_points.z(), new_distances);
+        calculate_inverse_distances(new_point, remaining_points.x(), remaining_points.y(),
+                                    remaining_points.z(), new_distances);
 
         // Now update the shortest distances.
         update_distances(shortest_distances.distances(), shortest_distances.idx_b(), new_distances,

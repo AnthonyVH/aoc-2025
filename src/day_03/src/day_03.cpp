@@ -1,5 +1,6 @@
 #include "aoc25/day_03.hpp"
 
+#include "aoc25/algorithm.hpp"
 #include "aoc25/simd.hpp"
 #include "aoc25/string.hpp"
 
@@ -14,28 +15,26 @@
 #include <string_view>
 
 namespace aoc25 {
-
   namespace {
 
     static constexpr uint8_t max_line_length = 100;
     static constexpr uint8_t max_lines = 200;
 
-    std::span<simd_string_view_t> split_lines(simd_string_view_t input,
-                                              std::span<simd_string_view_t> output) {
-      size_t begin = 0;
-      size_t line_idx = 0;
+    std::vector<simd_string_view_t> split_lines(simd_string_view_t input) {
+      // Each line in the input has the same length.
+      size_t const line_length = input.find('\n') + 1;
+      size_t const num_lines = input.size() / line_length;
 
-      while (begin < input.size()) {
-        assert(line_idx < output.size());
+      std::vector<simd_string_view_t> result;
+      result.reserve(num_lines);
 
-        size_t const line_end = input.find('\n', begin);
-        assert(line_end != input.npos);
-
-        output[line_idx++] = input.substr(begin, line_end - begin);
-        begin = line_end + 1;
+      for (size_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+        auto const line = input.substr(line_idx * line_length, line_length - 1);  // No newline.
+        assert(input[line_idx * line_length + line_length - 1] == '\n');
+        result.push_back(line);
       }
 
-      return output.first(line_idx);
+      return result;
     }
 
     // Note: No initialization of the members, since the algorithms below initialize them.
@@ -79,6 +78,7 @@ namespace aoc25 {
     struct max_digit_info_t {
       explicit max_digit_info_t(std::span<char const> input)
           : entries_{}, next_digit_pos{0} {
+        assert(input.size() <= entries_.size());
         initialize(input);
       }
 
@@ -292,29 +292,20 @@ namespace aoc25 {
   }  // namespace
 
   uint32_t day_t<3>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    // This benchmarks significantly faster than using aoc25::split().
-    std::array<simd_string_view_t, max_lines> all_lines;
-    std::span<simd_string_view_t> const lines = split_lines(input, all_lines);
+    auto const lines = split_lines(input);
 
     uint32_t sum = 0;
 
-#pragma omp parallel for reduction(+ : sum)
+#pragma omp parallel for reduction(+ : sum) schedule(static)
     for (auto const & line : lines) {
-      std::array<char, 2> max_digits = {};
+      // The first digit is the first largest in the range [0, N - 2). The second one is the
+      // largest in the remaining range. This could also be done in a single pass, but it's faster
+      // to do two passes with SIMD.
+      size_t const first_digit_pos = find_maximum_pos(line.substr(0, line.size() - 1).as_span());
+      char const second_digit = find_maximum(line.substr(first_digit_pos + 1).as_span());
 
-      // Iterate backwards and keep track of the largest two values seen. Skip the very last
-      // element, because that can only be used for the LSB.
-      for (size_t pos = line.size() - 1; pos-- > 0;) {
-        if (auto const data = line[pos]; data > max_digits[0]) {
-          max_digits = {data, max_digits[0]};
-        }
-      }
-
-      // Take last digit into account for LSB.
-      assert(!line.empty());
-      max_digits[1] = std::max(max_digits[1], line.back());
-
-      SPDLOG_DEBUG("line: '{}', max_digits: {}", line, max_digits);
+      std::array<char, 2> const max_digits = {line[first_digit_pos], second_digit};
+      SPDLOG_DEBUG("line: {:s}, max_digits: {}", line, max_digits);
       sum += 10 * (max_digits[0] - '0') + (max_digits[1] - '0');
     }
 
@@ -322,14 +313,13 @@ namespace aoc25 {
   }
 
   uint64_t day_t<3>::solve(part_t<2>, version_t<0>, simd_string_view_t input) {
-    std::array<simd_string_view_t, max_lines> all_lines;
-    std::span<simd_string_view_t> const lines = split_lines(input, all_lines);
+    auto const lines = split_lines(input);
 
     static constexpr uint8_t digits_to_use = 12;
 
     uint64_t sum = 0;
 
-#pragma omp parallel for reduction(+ : sum)
+#pragma omp parallel for reduction(+ : sum) schedule(static)
     for (auto const & line : lines) {
       // Prepare info for the first digit. Note that we already process all the entries required to
       // decide the first digit here, even though we'll reprocess the last entry again in the main
@@ -360,7 +350,7 @@ namespace aoc25 {
         jolts += max_digits.pop_next_digit() - '0';
       }
 
-      SPDLOG_DEBUG("line: '{}', jolts: {}", line, jolts);
+      SPDLOG_DEBUG("line: {:s}, jolts: {}", line, jolts);
       sum += jolts;
     }
 

@@ -1,5 +1,3 @@
-
-#include <type_traits>
 #if defined(AOC25_SIMD_HWY_H_TARGET) == defined(HWY_TARGET_TOGGLE)
 #  ifdef AOC25_SIMD_HWY_H_TARGET
 #    undef AOC25_SIMD_HWY_H_TARGET
@@ -16,6 +14,8 @@
 #  include <cassert>
 #  include <concepts>
 #  include <cstdint>
+#  include <limits>
+#  include <type_traits>
 
 #  undef HWY_TARGET_INCLUDE
 #  define HWY_TARGET_INCLUDE "src/simd-hwy.hpp"
@@ -26,12 +26,11 @@
 
 #  include <hwy/base.h>
 #  include <hwy/highway.h>
-#  include <hwy/highway_export.h>
+#  include <hwy/print-inl.h>
 
 HWY_BEFORE_NAMESPACE();
 
 namespace aoc25 {
-
   namespace HWY_NAMESPACE {
 
     namespace hn = hwy::HWY_NAMESPACE;
@@ -147,76 +146,180 @@ namespace aoc25 {
       return hn::ReduceSum(combine_tag, combined_accumulator);
     }
 
-    template <class T>
+    /** Generic implementation to find position of minimum or maximum (or whatever else could be
+     * passed as comparisson function).
+     */
+    template <class T, class ScalarCmpFn, class SimdCmpFn, class U>
       requires std::is_arithmetic_v<T>
-    size_t find_minimum_pos(simd_span_t<T const> input) {
-      static constexpr auto tag = hn::ScalableTag<T>{};
+    size_t find_best_pos(simd_span_t<T const> input,
+                         ScalarCmpFn && scalar_cmp,
+                         SimdCmpFn && simd_cmp,
+                         U initial_best_value) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      static_assert(std::is_same_v<input_t, U>, "Initial best value type must match input type");
+
+      static constexpr auto tag = hn::ScalableTag<input_t>{};
       static constexpr size_t lanes = hn::Lanes(tag);
 
-      auto const * const HWY_RESTRICT data = reinterpret_cast<T const *>(input.data());
+      auto const * const HWY_RESTRICT data = reinterpret_cast<input_t const *>(input.data());
 
-      T min_value = std::numeric_limits<T>::max();
-      size_t min_pos = 0;
-
-      auto min_values = hn::Set(tag, min_value);
+      size_t const num_inputs = input.size();
+      input_t best_value = initial_best_value;
+      auto best_values = hn::Set(tag, best_value);
+      size_t best_pos = 0;
       size_t pos = 0;
 
-      auto const process_minimums = [&](hn::Mask<decltype(tag)> const & is_less,
-                                        bool update_min_values) {
-        if (uint32_t match_bits = hn::BitsFromMask(tag, is_less); match_bits != 0) [[unlikely]] {
+      auto const process_matches = [&](hn::Mask<decltype(tag)> const & is_better,
+                                       bool update_best_values) {
+        if (uint32_t match_bits = hn::BitsFromMask(tag, is_better); match_bits != 0) [[unlikely]] {
           while (match_bits != 0) {
-            // Process in order, since there might be multiple "temporary" minimums.
+            // Process in order, since there might be multiple "temporary" bests.
             uint32_t const lane = std::countr_zero(match_bits);
             match_bits &= match_bits - 1;  // Clear lowest set bit.
 
             auto const value = data[pos + lane];
-            if (value < min_value) {
-              min_value = value;
-              min_pos = pos + lane;
+            if (scalar_cmp(value, best_value)) {
+              best_value = value;
+              best_pos = pos + lane;
             }
           }
 
-          if (update_min_values) {
-            min_values = hn::Set(tag, min_value);
+          if (update_best_values) {
+            best_values = hn::Set(tag, best_value);
           }
         }
       };
 
       // Process initial unaligned bytes.
-      size_t const unaligned_bytes = reinterpret_cast<uintptr_t>(data) % (lanes * sizeof(T));
-      size_t const unaligned_words = unaligned_bytes / sizeof(T);
-      assert(unaligned_bytes % sizeof(T) == 0);
+      size_t const unaligned_bytes = reinterpret_cast<uintptr_t>(data) % (lanes * sizeof(input_t));
+      size_t const unaligned_words = unaligned_bytes / sizeof(input_t);
+      assert(unaligned_bytes % sizeof(input_t) == 0);
+
+      if (unaligned_words != 0) {
+        size_t const initial_words = std::min(lanes - unaligned_words, num_inputs);
+
+        auto const chunk = hn::LoadNOr(best_values, tag, data + pos, initial_words);
+        auto const is_better = simd_cmp(chunk, best_values);
+        process_matches(is_better, true);
+        pos += initial_words;
+      }
+
+      for (; pos + lanes <= num_inputs; pos += lanes) {  // Process aligned chunks.
+        auto const chunk = hn::Load(tag, data + pos);
+        auto const is_better = simd_cmp(chunk, best_values);
+        process_matches(is_better, true);
+      }
+
+      if (pos < num_inputs) {  // Handle last partial chunk.
+        size_t const lanes_remaining = num_inputs - pos;
+        assert(pos + lanes_remaining == num_inputs);
+
+        auto const chunk = hn::LoadNOr(best_values, tag, data + pos, lanes_remaining);
+        auto const is_better = simd_cmp(chunk, best_values);
+        process_matches(is_better, false);
+      }
+
+      return best_pos;
+    }
+
+    template <class T>
+      requires std::is_arithmetic_v<T>
+    size_t find_minimum_pos(simd_span_t<T const> input) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      return find_best_pos(
+          input, std::less<>{},
+          [](auto const & chunk, auto const & best_values) { return hn::Lt(chunk, best_values); },
+          std::numeric_limits<input_t>::max());
+    }
+
+    template <class T>
+      requires std::is_arithmetic_v<T>
+    size_t find_maximum_pos(simd_span_t<T const> input) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      return find_best_pos(
+          input, std::greater<>{},
+          [](auto const & chunk, auto const & best_values) { return hn::Gt(chunk, best_values); },
+          std::numeric_limits<input_t>::min());
+    }
+
+    /** Generic implementation to find minimum or maximum (or whatever else could
+     * be passed as comparisson function).
+     */
+    template <class T, class SimdSelectFn, class SimdReduceFn, class U>
+      requires std::is_arithmetic_v<T>
+    size_t find_best(simd_span_t<T const> input,
+                     SimdSelectFn && simd_select,
+                     SimdReduceFn && simd_reduce,
+                     U initial_best_value) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      static_assert(std::is_same_v<input_t, U>, "Initial best value type must match input type");
+
+      static constexpr auto tag = hn::ScalableTag<input_t>{};
+      static constexpr size_t lanes = hn::Lanes(tag);
+
+      auto const * const HWY_RESTRICT data = reinterpret_cast<input_t const *>(input.data());
+
+      auto best_values = hn::Set(tag, initial_best_value);
+      size_t pos = 0;
+
+      // Process initial unaligned bytes.
+      size_t const unaligned_bytes = reinterpret_cast<uintptr_t>(data) % (lanes * sizeof(input_t));
+      size_t const unaligned_words = unaligned_bytes / sizeof(input_t);
+      assert(unaligned_bytes % sizeof(input_t) == 0);
 
       if (unaligned_words != 0) {
         size_t const initial_words = std::min(lanes - unaligned_words, input.size());
 
-        auto const chunk = hn::LoadU(tag, data + pos);
-        auto const is_less = hn::MaskedLt(hn::FirstN(tag, initial_words), chunk, min_values);
-        process_minimums(is_less, true);
-
+        auto const chunk = hn::LoadNOr(best_values, tag, data + pos, initial_words);
+        best_values = simd_select(chunk, best_values);
         pos += initial_words;
       }
 
       for (; pos + lanes <= input.size(); pos += lanes) {  // Process aligned chunks.
         auto const chunk = hn::Load(tag, data + pos);
-        auto const is_less = hn::Lt(chunk, min_values);
-        process_minimums(is_less, true);
+        best_values = simd_select(chunk, best_values);
       }
 
       if (pos < input.size()) {  // Handle last partial chunk.
         size_t const lanes_remaining = input.size() - pos;
         assert(pos + lanes_remaining == input.size());
 
-        auto const chunk = hn::LoadNOr(min_values, tag, data + pos, lanes_remaining);
-        auto const is_less = hn::Lt(chunk, min_values);
-        process_minimums(is_less, false);
+        auto const chunk = hn::LoadNOr(best_values, tag, data + pos, lanes_remaining);
+        best_values = simd_select(chunk, best_values);
       }
 
-      return min_pos;
+      return simd_reduce(best_values);
+    }
+
+    template <class T>
+      requires std::is_arithmetic_v<T>
+    size_t find_minimum(simd_span_t<T const> input) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      return find_best(
+          input,
+          [](auto const & chunk, auto const & best_values) { return hn::Min(chunk, best_values); },
+          [](auto const & best_values) {
+            using vec_t = std::remove_cvref_t<decltype(best_values)>;
+            return hn::ReduceMin(hn::DFromV<vec_t>{}, best_values);
+          },
+          std::numeric_limits<input_t>::max());
+    }
+
+    template <class T>
+      requires std::is_arithmetic_v<T>
+    size_t find_maximum(simd_span_t<T const> input) {
+      using input_t = std::conditional_t<std::is_same_v<T, char>, uint8_t, T>;
+      return find_best(
+          input,
+          [](auto const & chunk, auto const & best_values) { return hn::Max(chunk, best_values); },
+          [](auto const & best_values) {
+            using vec_t = std::remove_cvref_t<decltype(best_values)>;
+            return hn::ReduceMax(hn::DFromV<vec_t>{}, best_values);
+          },
+          std::numeric_limits<input_t>::min());
     }
 
   }  // namespace HWY_NAMESPACE
-
 }  // namespace aoc25
 
 HWY_AFTER_NAMESPACE();
@@ -236,6 +339,27 @@ namespace aoc25 {
     return HWY_DYNAMIC_DISPATCH_T(table)(input);
   }
 
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_maximum_pos(simd_span_t<T const> input) {
+    HWY_EXPORT_T(table, find_maximum_pos<T>);
+    return HWY_DYNAMIC_DISPATCH_T(table)(input);
+  }
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_minimum(simd_span_t<T const> input) {
+    HWY_EXPORT_T(table, find_minimum<T>);
+    return HWY_DYNAMIC_DISPATCH_T(table)(input);
+  }
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_maximum(simd_span_t<T const> input) {
+    HWY_EXPORT_T(table, find_maximum<T>);
+    return HWY_DYNAMIC_DISPATCH_T(table)(input);
+  }
+
 }  // namespace aoc25
 
-#endif  // AOC25_STRING_HWY_H_TARGET
+#endif  // AOC25_SIMD_HWY_H_TARGET

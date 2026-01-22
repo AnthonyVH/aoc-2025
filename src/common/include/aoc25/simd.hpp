@@ -286,6 +286,18 @@ namespace aoc25 {
     requires std::is_arithmetic_v<T>
   size_t find_minimum_pos(simd_span_t<T const> input);
 
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_maximum_pos(simd_span_t<T const> input);
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_minimum(simd_span_t<T const> input);
+
+  template <class T>
+    requires std::is_arithmetic_v<T>
+  size_t find_maximum(simd_span_t<T const> input);
+
 }  // namespace aoc25
 
 #include "aoc25/simd-hwy.hpp"

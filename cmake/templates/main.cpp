@@ -4,6 +4,7 @@
 
 #include "aoc25/day.hpp"
 #include "aoc25/file.hpp"
+#include "aoc25/logging.hpp"
 #include "aoc25/preprocessor.hpp"
 
 #include <fmt/ranges.h>
@@ -71,12 +72,8 @@ namespace {
 }  // namespace
 
 int main(int argc, char ** argv) {
-  // Setup default logging
-  spdlog::set_level(static_cast<spdlog::level::level_enum>(SPDLOG_ACTIVE_LEVEL));
-
-  // Try and set logging from env and command line args (in that order of preference).
-  spdlog::cfg::load_env_levels();
-  spdlog::cfg::load_argv_levels(argc, argv);
+  // Setup default logging.
+  aoc25::setup_logging(argc, argv);
 
   run_days<DAY_NUMBERS>();
 }

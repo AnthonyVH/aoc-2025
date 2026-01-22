@@ -6,6 +6,7 @@ target_sources(aoc25-common
   PRIVATE
     "src/day.cpp"
     "src/file.cpp"
+    "src/logging.cpp"
     "src/string.cpp"
     "src/system.cpp"
 )

@@ -4,14 +4,13 @@
 
 #include "aoc25/day.hpp"
 #include "aoc25/file.hpp"
+#include "aoc25/logging.hpp"
 #include "aoc25/preprocessor.hpp"
 #include "aoc25/string.hpp"
 
 #include <fmt/color.h>
 #include <fmt/ranges.h>
 #include <fmt/std.h>
-#include <spdlog/cfg/argv.h>
-#include <spdlog/cfg/env.h>
 #include <spdlog/spdlog.h>
 
 #include <cstddef>
@@ -173,12 +172,8 @@ namespace {
 }  // namespace
 
 int main(int argc, char ** argv) {
-  // Setup default logging
-  spdlog::set_level(static_cast<spdlog::level::level_enum>(SPDLOG_ACTIVE_LEVEL));
-
-  // Try and set logging from env and command line args (in that order of preference).
-  spdlog::cfg::load_env_levels();
-  spdlog::cfg::load_argv_levels(argc, argv);
+  // Setup default logging.
+  aoc25::setup_logging(argc, argv);
 
   auto const test_counts = verify_days<DAY_NUMBERS>();
   bool const success = test_counts.total == test_counts.successful;

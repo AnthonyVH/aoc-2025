@@ -47,12 +47,9 @@ namespace aoc25 {
      * of core, then all of them are threated as performance cores.
      */
     std::vector<uint8_t> get_p_core_indices() {
-      std::vector<uint8_t> result;
-
       auto const cores_info_path = std::filesystem::path("/sys/devices/cpu_core/cpus");
 
       // Parse CPUs string, which consists of ranges (e.g. "0-3"), potentially separated by commas.
-      // TODO: Get rid of this annoying string type.
       simd_string_t cpus;
 
       try {
@@ -61,6 +58,7 @@ namespace aoc25 {
         return get_all_core_indices();
       }
 
+      std::vector<uint8_t> result;
       auto cpus_view = std::string_view{cpus};
 
       while (!cpus_view.empty()) {

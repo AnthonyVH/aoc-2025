@@ -76,10 +76,12 @@ function (add_day_benchmark EXE_SUFFIX DAY_NUMBERS)
   target_link_libraries(${TARGET}
     PRIVATE
       benchmark::benchmark
+      magic_enum::magic_enum
   )
 
   # We want to maximally optimize in benchmark builds. So we want to do profile-guided optimization.
   set(ENABLE_PGO TRUE)
+
   if(ENABLE_PGO)
     # First define a target to generates a runtime profile.
     add_day_exe_from_template(${EXE_SUFFIX}-pgo_gen "benchmark.cpp" "${DAY_NUMBERS}" PGO_GEN_TARGET)
@@ -87,6 +89,7 @@ function (add_day_benchmark EXE_SUFFIX DAY_NUMBERS)
     target_link_libraries(${PGO_GEN_TARGET}
       PRIVATE
         benchmark::benchmark
+        magic_enum::magic_enum
     )
 
     set(PGO_DATA_DIR "${CMAKE_CURRENT_BINARY_DIR}/${PGO_GEN_TARGET}-pgo_data")
@@ -104,14 +107,19 @@ function (add_day_benchmark EXE_SUFFIX DAY_NUMBERS)
     # Next, create a custom command to run this executable from the main source dir.
     GetRenameFilesPath(RENAME_FILES_SCRIPT_PATH)
 
+    # We explicitly ignore some Asan errors, because whatever code is added for instrumentation
+    # doesn't play nice with it.
     add_custom_command(
       OUTPUT ${PGO_TIMESTAMP_FILE}
-      COMMAND $<TARGET_FILE:${PGO_GEN_TARGET}> --benchmark_min_time=1s
       COMMAND ${CMAKE_COMMAND}
-          -DFILE_DIR=${PGO_DATA_DIR}
-          -DNEEDLE=${PGO_GEN_TARGET}
-          -DREPLACEMENT=${TARGET}
-          -P ${RENAME_FILES_SCRIPT_PATH}
+        -E env "ASAN_OPTIONS=alloc_dealloc_mismatch=0"
+        $<TARGET_FILE:${PGO_GEN_TARGET}>
+          --benchmark_min_time=1s
+      COMMAND ${CMAKE_COMMAND}
+        -DFILE_DIR=${PGO_DATA_DIR}
+        -DNEEDLE=${PGO_GEN_TARGET}
+        -DREPLACEMENT=${TARGET}
+        -P ${RENAME_FILES_SCRIPT_PATH}
       COMMAND ${CMAKE_COMMAND} -E touch ${PGO_TIMESTAMP_FILE}
       WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
       DEPENDS ${PGO_GEN_TARGET}

@@ -4,7 +4,6 @@
 #include "aoc25/simd.hpp"
 
 #include <cstdint>
-#include <string_view>
 
 /*
  * --- Day 6: Trash Compactor ---
@@ -88,7 +87,6 @@ namespace aoc25 {
   template <>
   struct day_t<6> {
     uint64_t solve(part_t<1>, version_t<0>, simd_string_view_t input);
-    uint64_t solve(part_t<1>, version_t<1>, simd_string_view_t input);
 
     uint64_t solve(part_t<2>, version_t<0>, simd_string_view_t input);
   };

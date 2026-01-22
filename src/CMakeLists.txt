@@ -15,3 +15,4 @@ endforeach()
 # Build an executable that runs all days.
 add_day_main(all_days "${DAYS}")
 add_day_benchmark(all_days-benchmark "${DAYS}")
+add_day_verify(all_days-verify "${DAYS}")

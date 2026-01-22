@@ -163,7 +163,11 @@ namespace {
 
   template <size_t... Days>
   test_count_t verify_days() {
-    return (... + verify_day<Days>());
+    // Same here, need fold expression to ensure proper evaluation order.
+    test_count_t result{};
+    auto const add = [&](test_count_t tc) { result += tc; };
+    (add(verify_day<Days>()), ...);
+    return result;
   }
 
 }  // namespace

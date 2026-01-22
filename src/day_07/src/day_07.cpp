@@ -23,7 +23,6 @@
 HWY_BEFORE_NAMESPACE();
 
 namespace aoc25 {
-
   namespace HWY_NAMESPACE {
 
     namespace hn = hwy::HWY_NAMESPACE;
@@ -96,13 +95,6 @@ namespace aoc25 {
       // Isolate the "carry" bits and move them 1 word up.
       auto const carry_shift = hn::ShiftRight<64 - Shift>(vec_u64);
       auto const carries_word_shifted = hn::Slide1Up(shift_tag, carry_shift);
-      // auto const carries_word_shifted = hn::Per4LaneBlockShuffle<2, 1, 0, 0>(carry_shift);
-
-      //// Mask out carry bits on lowest word.
-      // HWY_ALIGN static constexpr std::array<uint64_t, 4> carries_word_mask = {
-      //     0, UINT64_MAX, UINT64_MAX, UINT64_MAX};
-      // auto const masked_carries_word_shifted =
-      //     hn::And(hn::Load(shift_tag, carries_word_mask.data()), carries_word_shifted);
 
       // Combine the shift elements with the carries.
       auto const combined_shift = hn::Or(lanes_left, carries_word_shifted);
@@ -133,13 +125,6 @@ namespace aoc25 {
       // Isolate the "carry" bits and move them 1 word down.
       auto const carry_shift = hn::ShiftLeft<64 - Shift>(vec_u64);
       auto const carries_word_shifted = hn::Slide1Down(shift_tag, carry_shift);
-      // auto const carries_word_shifted = hn::Per4LaneBlockShuffle<3, 3, 2, 1>(carry_shift);
-
-      //// Mask out carry bits on highest word.
-      // HWY_ALIGN static constexpr std::array<uint64_t, 4> carries_word_mask = {
-      //     UINT64_MAX, UINT64_MAX, UINT64_MAX, 0};
-      // auto const masked_carries_word_shifted =
-      //     hn::And(hn::Load(shift_tag, carries_word_mask.data()), carries_word_shifted);
 
       // Combine the shift elements with the carries.
       auto const combined_shift = hn::Or(lanes_right, carries_word_shifted);
@@ -192,7 +177,6 @@ namespace aoc25 {
     }
 
   }  // namespace HWY_NAMESPACE
-
 }  // namespace aoc25
 
 HWY_AFTER_NAMESPACE();
@@ -200,71 +184,16 @@ HWY_AFTER_NAMESPACE();
 #ifdef HWY_ONCE
 
 namespace aoc25 {
-
   namespace {
 
-    HWY_EXPORT(count_beam_splits);
-
     uint16_t count_beam_splits(simd_string_view_t line, size_t line_width, size_t start_pos) {
+      HWY_EXPORT(count_beam_splits);
       return HWY_DYNAMIC_DISPATCH(count_beam_splits)(line, line_width, start_pos);
     }
 
   }  // namespace
 
   uint64_t day_t<7>::solve(part_t<1>, version_t<0>, simd_string_view_t input) {
-    // Find beam start point (it's probably the middle, but let's be safe).
-    uint8_t const start_offset = input.find('S');
-
-    // Input is a matrix, so only detect width once, instead of searching for newlines.
-    uint8_t const width = input.find('\n', start_offset);  // Start from the beam start point.
-    uint8_t const height = input.size() / (width + 1);     // +1 for newline character.
-    SPDLOG_DEBUG("start: {}, width: {}, height: {}", start_offset, width, height);
-
-    // Now just go over each line. Keep track of where beams are when we "enter" the
-    // line and detect when they hit splitters.
-    std::vector<uint8_t> beam_positions;
-    std::vector<uint8_t> next_beam_positions;
-
-    uint32_t num_splits = 0;
-    beam_positions.push_back(start_offset);
-
-    // Every even line is empty, so skip them.
-    for (uint8_t row = 2; row < height; row += 2) {
-      [[maybe_unused]] auto const prev_line = input.substr((row - 1) * (width + 1), width);
-      assert(prev_line.find('^') == std::string_view::npos);  // Previous line has no splitters.
-
-      auto line = input.substr(row * (width + 1), width);  // +1 for newline character.
-      assert(line[0] == '.' && line[width - 1] == '.');    // Borders are always empty.
-      SPDLOG_DEBUG("Processing line {:3d}: {:s}", row, line);
-
-      // Check if any beams hit a splitter on this line.
-      for (auto const & pos : beam_positions) {
-        if (line[pos] == '^') {  // Splitter: For each beam that reaches here, create two new beams.
-          ++num_splits;
-
-          // Check if previous position already exists to avoid duplicates.
-          if (next_beam_positions.empty() || (next_beam_positions.back() != (pos - 1))) {
-            next_beam_positions.push_back(pos - 1);
-          }
-
-          next_beam_positions.push_back(pos + 1);
-        } else {  // No splitter: Beam continues straight.
-          if (next_beam_positions.empty() || (next_beam_positions.back() != (pos))) {
-            next_beam_positions.push_back(pos);
-          }
-        }
-      }
-
-      SPDLOG_DEBUG("  # beams: {}, # splits: {}", next_beam_positions.size(), num_splits);
-      std::swap(beam_positions, next_beam_positions);
-      next_beam_positions.clear();
-    }
-
-    return num_splits;
-  }
-
-  uint64_t day_t<7>::solve(part_t<1>, version_t<1>, simd_string_view_t input) {
-    // TODO: Find start offset and width using SIMD as well.
     // Find beam start point (it's probably the middle, but let's be safe).
     uint8_t const start_offset = input.find('S');
 
@@ -286,56 +215,13 @@ namespace aoc25 {
     uint8_t const height = input.size() / (width + 1);     // +1 for newline character.
     SPDLOG_DEBUG("start: {}, width: {}, height: {}", start_offset, width, height);
 
-    // Keep track of how many ways a beam can arrive at a given position.
-    auto beam_arrival_counts = std::vector<uint64_t>(width);
-    auto next_beam_arrival_counts = beam_arrival_counts;
-
-    beam_arrival_counts[start_offset] = 1;
-
-    // Every even line is empty, so skip them.
-    for (uint8_t row = 2; row < height; row += 2) {
-      [[maybe_unused]] auto const prev_line = input.substr((row - 1) * (width + 1), width);
-      assert(prev_line.find('^') == std::string_view::npos);  // Previous line has no splitters.
-
-      auto line = input.substr(row * (width + 1), width);  // +1 for newline character.
-      assert(line[0] == '.' && line[width - 1] == '.');    // Borders are always empty.
-      SPDLOG_DEBUG("Processing line {:3d}: {:s}", row, line);
-
-      // Check if any beams hit a splitter on this line.
-      for (size_t pos = 0; pos < width; ++pos) {
-        uint64_t const arrival_count = beam_arrival_counts[pos];
-        if (arrival_count == 0) {  // If there's no beam, it can't split.
-          continue;
-        }
-
-        if (line[pos] == '^') {  // Splitter: each beam that reaches here, create two new beams.
-          next_beam_arrival_counts[pos - 1] += arrival_count;
-          next_beam_arrival_counts[pos + 1] += arrival_count;
-        } else {  // No splitter: beam continues straight.
-          next_beam_arrival_counts[pos] += arrival_count;
-        }
-      }
-
-      SPDLOG_DEBUG("  Beam arrival counts: {::d}", next_beam_arrival_counts);
-      std::swap(beam_arrival_counts, next_beam_arrival_counts);
-      std::ranges::fill(next_beam_arrival_counts, 0);
-    }
-
-    return std::accumulate(beam_arrival_counts.begin(), beam_arrival_counts.end(), 0ULL);
-  }
-
-  uint64_t day_t<7>::solve(part_t<2>, version_t<1>, simd_string_view_t input) {
-    // Find beam start point (it's probably the middle, but let's be safe).
-    uint8_t const start_offset = input.find('S');
-
-    // Input is a matrix, so only detect width once, instead of searching for newlines.
-    uint8_t const width = input.find('\n', start_offset);  // Start from the beam start point.
-    uint8_t const height = input.size() / (width + 1);     // +1 for newline character.
-    SPDLOG_DEBUG("start: {}, width: {}, height: {}", start_offset, width, height);
-
-    // Keep track of how many ways a beam can arrive at a given position.
-    auto beam_arrival_counts = std::vector<uint64_t>(width);
-    beam_arrival_counts[start_offset] = 1;
+    // Keep track of how many ways a beam can arrive at a given position. To avoid needing to add
+    // special logic for the edges, add one extra position on the left side. This means that all
+    // indexing into this vector needs to be offset by 1. We work around it by accessing an offset
+    // pointer into the data.
+    auto beam_arrival_counts = std::vector<uint64_t>(width + 1);
+    auto * const beam_arrival_counts_ptr = beam_arrival_counts.data() + 1;
+    beam_arrival_counts_ptr[start_offset] = 1;
 
     // Keep track of addition for next position separately. This way, we don't overwrite data for
     // the next position before we have processed it. This then allows us to avoid using a second
@@ -353,26 +239,22 @@ namespace aoc25 {
 
       // Check if any beams hit a splitter on this line.
       for (size_t pos = 0; pos < width; ++pos) {
-        uint64_t const arrival_count = beam_arrival_counts[pos];
-        if ((beam_count_for_next_pos == 0) && (arrival_count == 0)) {
-          continue;
-        }
-
+        // No branches, it's faster to do no-op additions/multiplications instead.
+        uint64_t const arrival_count = beam_arrival_counts_ptr[pos];
         bool const is_splitter = (line[pos] == '^');
 
-        beam_arrival_counts[pos] += beam_count_for_next_pos;
+        beam_arrival_counts_ptr[pos] += beam_count_for_next_pos;
         beam_count_for_next_pos = is_splitter ? arrival_count : 0;
 
-        if (is_splitter) {
-          beam_arrival_counts[pos - 1] += arrival_count;
-          beam_arrival_counts[pos] -= arrival_count;
-        }
+        beam_arrival_counts_ptr[pos - 1] += is_splitter * arrival_count;
+        beam_arrival_counts_ptr[pos] -= is_splitter * arrival_count;
       }
 
-      SPDLOG_DEBUG("  Beam arrival counts: {::d}", beam_arrival_counts);
+      SPDLOG_DEBUG("  Beam arrival counts: {::d}", std::span{beam_arrival_counts}.subspan(1));
     }
 
-    return std::accumulate(beam_arrival_counts.begin(), beam_arrival_counts.end(), 0ULL);
+    // Don't count padding column on the left.
+    return std::accumulate(beam_arrival_counts.begin() + 1, beam_arrival_counts.end(), 0ULL);
   }
 
 }  // namespace aoc25

@@ -11,7 +11,7 @@ I set myself a few goals to keep things interesting/challenging:
   - [x] Solve all of a day's problems in under 1 ms combined.
   - [ ] Solve all problems in under 1 ms combined.
 
-Clearly the main goal was: make things as fast as possible. Unfortunately I didn't manage the "everything in under 1 ms" challenge. I got very close though, with a combined runtime of 1.29 ms for all problems.
+Clearly the main goal was: make things as fast as possible. Unfortunately I didn't manage the "everything in under 1 ms" challenge. I got very close though, with a combined runtime of 1.10 ms for all problems.
 
 > [!NOTE]
 > None of the implementations are tuned to my inputs. I.e. any input conforming to what is given as an example on the Advent of Code's website should work. Of course I can't test that, since I don't have access to other input files.
@@ -35,31 +35,31 @@ Compilation was done in CMake's `Release` mode, with profile-guided optimization
 ╭────────────────────────────────────────────────────────────╮
 │ Benchmark                Time             CPU   Iterations │
 ╰────────────────────────────────────────────────────────────╯
-  day 01 - part 1       15.1 us         15.1 us        49139
-  day 01 - part 2       17.8 us         17.8 us        39063
-  day 02 - part 1      0.614 us        0.614 us      1187483
-  day 02 - part 2       1.12 us         1.12 us       625569
-  day 03 - part 1       2.56 us         2.56 us       274452
-  day 03 - part 2       4.08 us         4.07 us       174174
-  day 04 - part 1       1.85 us         1.85 us       265728
-  day 04 - part 2       90.7 us         90.7 us         6797
-  day 05 - part 1       10.8 us         10.8 us        48181
-  day 05 - part 2       3.28 us         3.28 us       142673
-  day 06 - part 1       5.51 us         5.51 us       121176
-  day 06 - part 2       5.87 us         5.87 us       120232
-  day 07 - part 1      0.818 us        0.818 us       815155
-  day 07 - part 2       5.09 us         5.09 us       129519
-  day 08 - part 1        371 us          371 us         1742
-  day 08 - part 2        307 us          307 us         2140
-  day 09 - part 1       5.48 us         5.48 us       121624
-  day 09 - part 2       74.2 us         74.2 us         9441
-  day 10 - part 1       63.9 us         63.8 us        10296
-  day 10 - part 2        283 us          281 us         2610
-  day 11 - part 1       4.88 us         4.87 us       137230
-  day 11 - part 2       9.86 us         9.86 us        72798
-  day 12 - part 1       5.62 us         5.62 us       121303
+  day 01 - part 1       14.1 us         14.1 us        49014
+  day 01 - part 2       17.9 us         17.9 us        39083
+  day 02 - part 1      0.600 us        0.600 us      1162240
+  day 02 - part 2       1.11 us         1.11 us       628806
+  day 03 - part 1       2.02 us         2.02 us       251657
+  day 03 - part 2       4.17 us         4.17 us       173261
+  day 04 - part 1       2.27 us         2.27 us       308822
+  day 04 - part 2        104 us          103 us         6749
+  day 05 - part 1       14.5 us         14.5 us        48263
+  day 05 - part 2       4.92 us         4.92 us       142410
+  day 06 - part 1       5.49 us         5.49 us       124417
+  day 06 - part 2       5.78 us         5.78 us       119230
+  day 07 - part 1      0.861 us        0.861 us       815084
+  day 07 - part 2       5.40 us         5.39 us       129339
+  day 08 - part 1        278 us          277 us         2527
+  day 08 - part 2        175 us          175 us         4004
+  day 09 - part 1       5.77 us         5.77 us       120859
+  day 09 - part 2       84.9 us         84.7 us         8255
+  day 10 - part 1       73.1 us         73.0 us         9579
+  day 10 - part 2        274 us          274 us         2564
+  day 11 - part 1       5.35 us         5.34 us       130514
+  day 11 - part 2       10.3 us         10.3 us        67973
+  day 12 - part 1       5.73 us         5.73 us       121481
   ──────────────────────────────────────────────────────────
-  Total                 1290 us         1288 us
+  Total                 1095 us         1093 us
 ```
 
 ## :hammer: Building

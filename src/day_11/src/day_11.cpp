@@ -13,42 +13,9 @@
 #include <ranges>
 #include <utility>
 
-#undef HWY_TARGET_INCLUDE
-#define HWY_TARGET_INCLUDE "src/day_11.cpp"
-
-// clang-format off
-#include <hwy/foreach_target.h>
-// clang-format on
-
-#include <hwy/highway.h>
-
-HWY_BEFORE_NAMESPACE();
-
-namespace aoc25 {
-  namespace {
-    namespace HWY_NAMESPACE {
-
-      namespace hn = hwy::HWY_NAMESPACE;
-
-      [[maybe_unused]] void compiler_stop_complaining() {}
-
-    }  // namespace HWY_NAMESPACE
-  }  // namespace
-}  // namespace aoc25
-
-HWY_AFTER_NAMESPACE();
-
-#ifdef HWY_ONCE
-
 namespace aoc25 {
 
   namespace {
-
-    HWY_EXPORT(compiler_stop_complaining);
-
-    [[maybe_unused]] void compiler_stop_complaining() {
-      return HWY_DYNAMIC_DISPATCH(compiler_stop_complaining)();
-    }
 
     enum class node_name_t : uint8_t {
       you,
@@ -140,7 +107,8 @@ namespace aoc25 {
 
       enum class state_t { name, neighbors };
 
-      auto name_to_idx = std::vector<uint16_t>(max_num_names, UINT16_MAX);
+      static constexpr auto tombstone = std::numeric_limits<uint16_t>::max();
+      auto name_to_idx = std::vector<uint16_t>(max_num_names, tombstone);
       uint16_t next_idx = 0;
 
       auto state = state_t::name;
@@ -151,6 +119,8 @@ namespace aoc25 {
 
       auto result = problem_t(num_nodes);
 
+      // Note: This is faster than splitting lines/detecting the line's end and then parsing
+      // node names at known locations. Did not spend tons of time figuring out why.
       while (!input.empty()) {
         switch (state) {
           case state_t::name: {
@@ -159,9 +129,7 @@ namespace aoc25 {
             input.remove_prefix(5);  // Skip "aaa: "
 
             auto & idx = name_to_idx[hash_name(name_token)];
-            if (idx == UINT16_MAX) {
-              idx = next_idx++;
-            }
+            idx = (idx != tombstone) ? idx : next_idx++;
 
             parent_idx = idx;
             state = state_t::neighbors;
@@ -171,9 +139,7 @@ namespace aoc25 {
           case state_t::neighbors: {
             auto const name_token = input.substr(0, 3);
             auto & idx = name_to_idx[hash_name(name_token)];
-            if (idx == UINT16_MAX) {
-              idx = next_idx++;
-            }
+            idx = (idx != tombstone) ? idx : next_idx++;
 
             result.add_neighbor(idx);
 
@@ -212,14 +178,12 @@ namespace aoc25 {
       }
 
       uint64_t solve(part_t<2>) {
-        // Get all nodes reachable from start, these will also include nodes reachable from dac and
-        // fft (otherwise it would mean there is no path going through them).
-        auto const reachable_nodes = find_all_reachable_nodes(problem_[node_name_t::svr]);
+        // All nodes are reachable from svr, so there's no need to determine reachable nodes first.
 
         // The graph is a DAG, so there can't be a cycle between dac and fft. So on the way to the
         // end, one will always come before the other, and it will be in the order of the list
         // generated here.
-        auto const sorted_nodes = topological_sort(reachable_nodes, problem_[node_name_t::svr]);
+        auto const sorted_nodes = topological_sort();
 
         // Find out whether dac or fft comes first.
         auto const dac_it = std::ranges::find(sorted_nodes, problem_[node_name_t::dac]);
@@ -269,7 +233,7 @@ namespace aoc25 {
                                              uint16_t start_idx) const {
         // Prepare number of neighbors for topological sort. Note that the count might be wrong for
         // nodes not on path, but we don't care, since those nodes won't be used.
-        auto num_neighbors = std::vector<uint64_t>(problem_.num_nodes());
+        auto num_neighbors = std::vector<uint16_t>(problem_.num_nodes());
         for (auto const node_idx : nodes) {
           for (auto const neighbor_idx : problem_.neighbors(node_idx)) {
             num_neighbors.at(neighbor_idx) += 1;
@@ -283,6 +247,36 @@ namespace aoc25 {
         std::vector<uint16_t> nodes_to_process;
         nodes_to_process.push_back(start_idx);
 
+        return topological_sort_impl(nodes_to_process, sorted_nodes, num_neighbors);
+      }
+
+      std::vector<uint16_t> topological_sort() const {
+        // Prepare number of neighbors for topological sort. Note that the count might be wrong for
+        // nodes not on path, but we don't care, since those nodes won't be used.
+        auto num_neighbors = std::vector<uint16_t>(problem_.num_nodes());
+        for (size_t node_idx = 0; node_idx < problem_.num_nodes(); ++node_idx) {
+          for (auto const neighbor_idx : problem_.neighbors(node_idx)) {
+            num_neighbors.at(neighbor_idx) += 1;
+          }
+        }
+
+        // Topological sort using Kahn's algorithm.
+        std::vector<uint16_t> sorted_nodes;
+        sorted_nodes.reserve(problem_.num_nodes());
+
+        std::vector<uint16_t> nodes_to_process;
+        for (size_t idx = 0; idx < num_neighbors.size(); ++idx) {
+          if (num_neighbors.at(idx) == 0) {
+            nodes_to_process.push_back(idx);
+          }
+        }
+
+        return topological_sort_impl(nodes_to_process, sorted_nodes, num_neighbors);
+      }
+
+      std::vector<uint16_t> topological_sort_impl(std::vector<uint16_t> & nodes_to_process,
+                                                  std::vector<uint16_t> & sorted_nodes,
+                                                  std::span<uint16_t> num_neighbors) const {
         while (!nodes_to_process.empty()) {
           uint16_t const node_idx = nodes_to_process.back();
           nodes_to_process.pop_back();
@@ -293,8 +287,9 @@ namespace aoc25 {
           }
 
           for (auto const neighbor_idx : problem_.neighbors(node_idx)) {
-            num_neighbors.at(neighbor_idx) -= 1;
-            if (num_neighbors.at(neighbor_idx) == 0) {
+            assert(neighbor_idx < num_neighbors.size());
+            num_neighbors[neighbor_idx] -= 1;
+            if (num_neighbors[neighbor_idx] == 0) {
               nodes_to_process.push_back(neighbor_idx);
             }
           }
@@ -343,5 +338,3 @@ namespace aoc25 {
   }
 
 }  // namespace aoc25
-
-#endif  // HWY_ONCE

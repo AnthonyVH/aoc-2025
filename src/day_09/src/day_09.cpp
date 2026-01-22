@@ -683,16 +683,17 @@ namespace aoc25 {
 
     /* For each x-coordinate i:
      *
-     *   - Create active vertical ranges, there are already known.
+     *   - Create active vertical ranges, these are already calculated.
      *   - Loop over all x-coordinates j, j >= i, while there are active ranges.
      *     - For each active range, for each extremal y coordinate in that range, calculate area
-     *       with extremal y coordinates from x_j that fall within that range. Store maximum area.
+     *       to extremal y coordinates from x_j that fall within that range. Store maximum area.
      *     - Update active vertical ranges using activate ranges at x_j.
      *     - Remove any of x_i's y coordinates that are not within active ranges anymore. If an
      *       active range is empty, remove it.
      */
     uint64_t max_area = 0;
 
+#pragma omp parallel for reduction(max : max_area) schedule(dynamic) num_threads(8)
     for (size_t idx_a = 0; idx_a < vertical_edges.size() - 1; ++idx_a) {
       auto const & edges_a = vertical_edges.at(idx_a);
       auto const & ranges_a = vertical_ranges.at(idx_a).ranges;
@@ -733,7 +734,7 @@ namespace aoc25 {
              ++edges_idx) {
           auto const & edge = new_edges.at(edges_idx);
 
-          // Find active range which this edge start lies in.
+          // Find active range which this edge's begin lies in.
           auto const is_above_range_end = [&](uint32_t coord) {
             auto const & active_range = active_ranges.at(active_range_idx);
             return coord > active_range.range[1];
@@ -748,7 +749,7 @@ namespace aoc25 {
             max_area = std::max<uint64_t>(max_area, max_area_with_begin);
           }
 
-          // Next find active range which this edge end lies in.
+          // Next find active range which this edge's end lies in.
           auto const is_below_range_begin = [&](uint32_t coord) {
             auto const & active_range = active_ranges.at(active_range_idx);
             return coord < active_range.range[0];

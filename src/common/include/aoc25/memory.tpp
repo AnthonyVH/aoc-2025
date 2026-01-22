@@ -2,7 +2,9 @@
 
 #include "aoc25/memory.hpp"  // Enable IDE syntax highlighting.
 
+#include <cassert>
 #include <new>
+#include <stdexcept>
 
 namespace aoc25 {
 
@@ -17,6 +19,13 @@ namespace aoc25 {
 
     size = (size + (Alignment - 1)) / Alignment * Alignment;
     size += 2 * Alignment;  // Add padding before and after to allow for SIMD loads.
+
+    // GCC keeps printing errors about too large allocations during PGO + LTO-enabled builds. So
+    // let's make sure we see this if it actually happens.
+    static constexpr size_t max_alloc_size = PTRDIFF_MAX;
+    if (size > max_alloc_size) [[unlikely]] {
+      throw std::invalid_argument("aligned_allocator: allocation size too large");
+    }
 
     void * ptr = std::aligned_alloc(Alignment, size);
     if (!ptr) {

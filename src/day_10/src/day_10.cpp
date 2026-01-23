@@ -58,7 +58,6 @@ namespace fmt {
 };  // namespace fmt
 
 namespace aoc25 {
-
   namespace {
 
     struct problem_t {
@@ -73,68 +72,148 @@ namespace aoc25 {
                          obj.num_bits + 2, obj.switches, obj.num_bits + 2, obj.jolts);
     }
 
-    problem_t parse(simd_string_view_t input) {
-      problem_t result;
+  }  // namespace
+}  // namespace aoc25
 
-      assert(!input.empty());
-      assert(input[0] == '[');
-      auto const end_bracket_pos = input.find(']');
-      assert(end_bracket_pos != simd_string_view_t::npos);
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "src/day_10.cpp"
 
-      {
-        // Input is basically given MSB first.
-        result.num_bits = end_bracket_pos - 1;
+// clang-format off
+#include <hwy/foreach_target.h>
+// clang-format on
 
-        for (size_t idx = 0; idx < result.num_bits; ++idx) {
-          char c = input[1 + idx];
-          assert(c == '.' || c == '#');
-          if (c == '#') {
-            result.target |= (1 << idx);
+#include <hwy/cache_control.h>
+#include <hwy/highway.h>
+
+HWY_BEFORE_NAMESPACE();
+
+namespace aoc25 {
+  namespace {
+    namespace HWY_NAMESPACE {
+
+      namespace hn = hwy::HWY_NAMESPACE;
+
+      problem_t parse(simd_string_view_t input) {
+        problem_t result;
+
+        static constexpr size_t max_lights = 10;
+
+        {  // An 128-bit SIMD register can hold all light-related bytes.
+          static constexpr auto tag = hn::Full128<uint8_t>{};
+          static_assert(hn::Lanes(tag) >= max_lights);
+
+          uint8_t const * const HWY_RESTRICT input_ptr =
+              reinterpret_cast<uint8_t const *>(input.data());
+
+          auto const lights_chunk = hn::LoadU(tag, input_ptr + 1);
+          auto const must_be_on = hn::Eq(lights_chunk, hn::Set(tag, '#'));
+          auto const end_of_chunk = hn::Eq(lights_chunk, hn::Set(tag, ']'));
+
+          // Set all bits below the end to 1 (since only 1 bit in the mask is set).
+          uint16_t const chunk_valid = hn::BitsFromMask(tag, end_of_chunk) - 1;
+          result.target = hn::BitsFromMask(tag, must_be_on) & chunk_valid;
+          result.num_bits = std::popcount(chunk_valid);
+          assert(result.num_bits <= max_lights);
+
+          input.remove_prefix(3 + result.num_bits);  // Move past lights data and space.
+        }
+
+        {  // Parse all the switch entries.
+          size_t const num_switches = aoc25::count(input.as_span(), '(');
+          result.switches.resize(num_switches);
+
+          // Since there's at most 10 lights, the switch values have at most 1 digit each. Which
+          // means that each switch entry has at most 2 + 10 * 2 - 1 = 21 characters (2 braces, 10
+          // digits, 9 commas). So a single load is guaranteed to load the entire switch entry.
+          static constexpr size_t max_switch_entry_size = 21 - 1;  // Skip first '('.
+          static constexpr auto tag = hn::ScalableTag<uint8_t>{};
+          static_assert(hn::Lanes(tag) >= max_switch_entry_size);
+          static constexpr auto wide_tag = hn::FixedTag<uint16_t, hn::Lanes(tag) / 2>{};
+          static constexpr auto reduced_tag = hn::Half<decltype(wide_tag)>{};
+
+          uint8_t const * HWY_RESTRICT input_ptr = reinterpret_cast<uint8_t const *>(input.data());
+
+          for (size_t switch_idx = 0; switch_idx < num_switches; ++switch_idx) {
+            auto const switch_chunk = hn::LoadU(tag, input_ptr + 1);  // Skip '('.
+            auto const end_of_chunk = hn::Eq(switch_chunk, hn::Set(tag, ')'));
+
+            // For next iteration, skip '(', data, ')', and space after current chunk.
+            input_ptr += std::countr_zero(hn::BitsFromMask(tag, end_of_chunk)) + 3;
+
+            // Set all invalid lanes to '9' + 1, so they don't affect the final result.
+            auto const valid_entries = hn::SetBeforeFirst(end_of_chunk);
+            auto const switch_entries =
+                hn::IfThenElse(valid_entries, switch_chunk, hn::Set(tag, '9' + 1));
+
+            // Extract all even lanes (i.e. drop the commas), and promote them to 16 bit.
+            auto const ascii_entries = hn::PromoteEvenTo(wide_tag, switch_entries);
+
+            // Convert all ASCII digits to (1 << value).
+            auto const digits = hn::Sub(ascii_entries, hn::Set(wide_tag, '0'));
+            auto const bit_values = hn::Shl(hn::Set(wide_tag, 1u), digits);
+
+            // Reduce all 16 lanes into a single OR'ed value.
+            auto or_reduced = hn::LowerHalf(reduced_tag, bit_values) |
+                              hn::UpperHalf(reduced_tag, bit_values);  // 8 lanes remaining.
+            or_reduced |= hn::Reverse8(reduced_tag, or_reduced);       // 4 lanes remaining.
+            or_reduced |= hn::Reverse4(reduced_tag, or_reduced);       // 2 lanes remaining.
+            or_reduced |= hn::Reverse2(reduced_tag, or_reduced);       // 1 lane remaining.
+
+            // Extract final value and mask out all set bits > 10.
+            uint16_t const switch_value = hn::GetLane(or_reduced) & ((1 << max_lights) - 1);
+            result.switches[switch_idx] = switch_value;
+          }
+
+          // Move input past all switch entries and space.
+          size_t const num_chars_parsed =
+              input_ptr - reinterpret_cast<uint8_t const *>(input.data());
+          input.remove_prefix(num_chars_parsed);
+        }
+
+        {  // Jolts numbers have different lengths, so fall back to scalar parsing.
+#ifndef NDEBUG
+          [[maybe_unused]] size_t const num_jolts = aoc25::count(input.as_span(), ',') + 1;
+          assert(num_jolts == result.num_bits);
+#endif
+          result.jolts.resize(result.num_bits);
+
+          char const * const input_end = input.data() + input.size();
+          char const * input_ptr = input.data();
+
+          for (auto & dest : result.jolts) {
+            auto const [out_ptr, error_code] = std::from_chars(input_ptr + 1, input_end, dest);
+            assert(error_code == std::errc{});
+            input_ptr = out_ptr;
           }
         }
-      }
-      input.remove_prefix(end_bracket_pos + 2);
 
-      while (input[0] == '(') {
-        auto const end_paren_pos = input.find(')');
-        assert(end_paren_pos != simd_string_view_t::npos);
-        simd_string_view_t token = input.substr(1, end_paren_pos - 1);
-
-        uint16_t switch_value = 0;
-
-        while (!token.empty()) {
-          auto const comma_pos = token.find(',');
-          simd_string_view_t bit_token = token.substr(0, comma_pos);
-          assert(bit_token.size() == 1);
-          uint8_t const bit_pos = bit_token[0] - '0';
-          switch_value |= (1 << bit_pos);
-          token.remove_prefix(bit_token.size() + (comma_pos == simd_string_view_t::npos ? 0 : 1));
-        }
-
-        result.switches.push_back(switch_value);
-        input.remove_prefix(end_paren_pos + 2);
+        SPDLOG_DEBUG("Parsed {}", result);
+        return result;
       }
 
-      assert(!input.empty());
-      assert(input.front() == '{');
-      assert(input.back() == '}');
-      input = input.substr(1, input.size() - 2);  // Remove braces.
+    }  // namespace HWY_NAMESPACE
+  }  // namespace
+}  // namespace aoc25
 
-      while (!input.empty()) {
-        auto const comma_pos = input.find(',');
-        simd_string_view_t bit_token = input.substr(0, comma_pos);
-        result.jolts.push_back(to_int<uint16_t>(bit_token));
-        input.remove_prefix((comma_pos == simd_string_view_t::npos ? input.size() : comma_pos + 1));
-      }
+HWY_AFTER_NAMESPACE();
 
-      SPDLOG_TRACE("Parsed {}", result);
-      return result;
+#ifdef HWY_ONCE
+
+namespace aoc25 {
+  namespace {
+
+    problem_t parse(simd_string_view_t input) {
+      HWY_EXPORT(parse);
+      return HWY_DYNAMIC_DISPATCH(parse)(input);
     }
 
     std::vector<problem_t> parse_input(simd_string_view_t input) {
-      std::vector<problem_t> result;
-      result.reserve(200);
-      split(input, [&](simd_string_view_t line) { result.push_back(parse(line)); });
+      size_t const num_problems = aoc25::count(input.as_span(), '\n');
+      auto result = std::vector<problem_t>(num_problems);
+
+      size_t problem_idx = 0;
+      split(input, [&](simd_string_view_t line) { result[problem_idx++] = parse(line); });
+
       return result;
     }
 
@@ -194,9 +273,8 @@ namespace aoc25 {
           uint8_t num_bits,
           std::span<uint16_t const> previous_table) {
         /* Generate table as a Gray code, where each element only differs from the previous one in
-         * two places. The algorithm implemented here uses the Revolving Door method. An alternative
-         * is Chase's sequence.
-         * See e.g.:
+         * two places. The algorithm implemented here uses the Revolving Door method. An
+         * alternative is Chase's sequence. See e.g.:
          *  - https://encyclopediaofmath.org/wiki/Gray_code
          *  - https://www.baeldung.com/cs/generate-k-combinations
          */
@@ -205,7 +283,8 @@ namespace aoc25 {
         //  - result for k bits set for num_bits - 1,
         //  - reversed result for k - 1 bits set for num_bits - 1, with the bit at num_bits set.
 
-        // First find the begin and end position of combinations with k bits in the previous table.
+        // First find the begin and end position of combinations with k bits in the previous
+        // table.
         auto const sum_of_num_combinations = [](int8_t n, int8_t k) -> size_t {
           if (k <= 0) {
             return 0;
@@ -369,7 +448,8 @@ namespace aoc25 {
       return std::make_tuple(DiagonalMatrixX<T>(input.diagonal()), std::move(P), std::move(Q));
     }
 
-    /** @brief Calculate a linear system that generates all possible solutions to the given problem.
+    /** @brief Calculate a linear system that generates all possible solutions to the given
+     * problem.
      */
     std::tuple<Eigen::VectorX<int16_t>, Eigen::MatrixX<int16_t>> generate_solution_system(
         problem_t const & problem) {
@@ -603,7 +683,8 @@ namespace aoc25 {
           uint8_t const num_nonzero = (constraints.row(row).array() != 0).count();
           int16_t const bound = bounds(row);
 
-          // If bound is negative, then number of pushes must be at least -bound, i.e. lower bound.
+          // If bound is negative, then number of pushes must be at least -bound, i.e. lower
+          // bound.
           bound_types[row] = (bound < 0) ? bound_type_t::lower : bound_type_t::upper;
 
           if (num_nonzero == 1) {
@@ -611,9 +692,9 @@ namespace aoc25 {
               if (int16_t const coef = constraints(row, col); coef != 0) {
                 is_free_variable_.at(col) = coef < 0;
 
-                // If the bound is negative, the constraint is Ax >= b, with b = -bound. Thus, this
-                // is a lower bound on only this variable, which means we must replace it with a new
-                // variable x' = x - offset, where offset = b / A.
+                // If the bound is negative, the constraint is Ax >= b, with b = -bound. Thus,
+                // this is a lower bound on only this variable, which means we must replace it
+                // with a new variable x' = x - offset, where offset = b / A.
                 if (bound < 0) {
                   // NOTE: Stored offset is negative.
                   double lower_limit = static_cast<double>(bound) / coef;
@@ -668,10 +749,10 @@ namespace aoc25 {
         // deal with free variables for which we need to duplicate the columns. At this point we
         // also set the objective coefficients, since these also might need to be duplicated.
         //
-        // The objective should be minimized, so keep the signs. The simplex algorithm will maximize
-        // the objective, so we would negate the objective coefficients. However, to make the
-        // algorithm maximize, those coefficients must then be negated again, hence we would do a
-        // double negation.
+        // The objective should be minimized, so keep the signs. The simplex algorithm will
+        // maximize the objective, so we would negate the objective coefficients. However, to make
+        // the algorithm maximize, those coefficients must then be negated again, hence we would
+        // do a double negation.
         int var_col = 1;
         for (int var_idx = 0; var_idx < static_cast<int>(num_unknowns); ++var_idx) {
           if (is_free_variable_.at(var_idx)) {
@@ -703,10 +784,10 @@ namespace aoc25 {
          *  - negative bound: when the solved variables are substituted back into the constraint,
          *    the result must be >= -bound, to ensure the corresponding number of pushes becomes
          *    positive. This means the constraint is of the form Ax >= b, where b is positive. In
-         *    this case we need to add a surplus variable, not a slack variable. We also have to add
-         *    an artificial variable to be able to find an initial basic feasible solution. Note
-         *    that neither a surplus, nor an artificial variable should be added if this constraint
-         *    is a lower bound on a single variable.
+         *    this case we need to add a surplus variable, not a slack variable. We also have to
+         * add an artificial variable to be able to find an initial basic feasible solution. Note
+         *    that neither a surplus, nor an artificial variable should be added if this
+         * constraint is a lower bound on a single variable.
          *
          *  - positive bound: when the solved variables are substituted back into the constraint,
          *    the result must be >= -bound, to ensure the corresponding number of pushes remains
@@ -757,8 +838,8 @@ namespace aoc25 {
 
         check_canonical(tableau_);
 
-        // If num_surplus_variables > 0, we need to perform Phase 1 of the two-phase simplex method
-        // to find an initial basic feasible solution.
+        // If num_surplus_variables > 0, we need to perform Phase 1 of the two-phase simplex
+        // method to find an initial basic feasible solution.
         if (num_surplus_variables > 0) {
           run_phase_one(1 + num_variable_columns + num_slack_variables + num_surplus_variables,
                         num_surplus_variables);
@@ -1080,7 +1161,7 @@ namespace aoc25 {
     static constexpr size_t max_switches = 13;
     static constexpr combination_tables_t<max_switches> combination_tables;
 
-#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(8)
+#  pragma omp parallel for reduction(+ : total) schedule(static) num_threads(6)
     for (auto const & problem : problems) {
       SPDLOG_DEBUG("Solving {} ({} switches)", problem, problem.switches.size());
       assert(problem.switches.size() <= max_switches);
@@ -1099,8 +1180,8 @@ namespace aoc25 {
         // then be used to compute a LUT for to the switch values. Since there's at most 13
         // switches, and we know that combo_diff has exactly two bits set, that means a LUT of
         // bin(13, 2) = 78 entries. In that case we do have to make sure that when transitioning
-        // from N to N + 1 bits set, we apply all required differences, such that we start with all
-        // the necessary switches toggled on.
+        // from N to N + 1 bits set, we apply all required differences, such that we start with
+        // all the necessary switches toggled on.
         uint16_t const combo = table[idx];
         uint16_t const combo_diff = prev_combo ^ combo;  // Determine which bits changed.
         prev_combo = combo;
@@ -1124,7 +1205,7 @@ namespace aoc25 {
     auto const problems = parse_input(input);
     uint64_t total = 0;
 
-#pragma omp parallel for reduction(+ : total) schedule(guided) num_threads(4)
+#  pragma omp parallel for reduction(+ : total) schedule(guided) num_threads(4)
     for (auto const & problem : problems) {
       // Obtain generator for all possible integer solutions, with reduced number of free
       // variables.
@@ -1143,3 +1224,5 @@ namespace aoc25 {
   }
 
 }  // namespace aoc25
+
+#endif  // HWY_ONCE

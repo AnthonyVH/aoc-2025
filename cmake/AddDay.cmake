@@ -79,8 +79,9 @@ function (add_day_benchmark EXE_SUFFIX DAY_NUMBERS)
       magic_enum::magic_enum
   )
 
-  # We want to maximally optimize in benchmark builds. So we want to do profile-guided optimization.
-  set(ENABLE_PGO TRUE)
+  # Set this to true to enable profile-guided optimization. Overall it seems like a negative though.
+  # TODO: Allow enabling this per target.
+  set(ENABLE_PGO FALSE)
 
   if(ENABLE_PGO)
     # First define a target to generates a runtime profile.

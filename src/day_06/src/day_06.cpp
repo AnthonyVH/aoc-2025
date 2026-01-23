@@ -80,7 +80,7 @@ namespace aoc25 {
 
     uint64_t total = 0;
 
-#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(4)
+#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(6)
     for (size_t problem_idx = 0; problem_idx < num_problems; ++problem_idx) {
       size_t const operator_offset = operator_offsets[problem_idx];
       size_t const num_digits = operator_offsets[problem_idx + 1] - operator_offset - 1;
@@ -131,7 +131,7 @@ namespace aoc25 {
         calculate_operator_offsets(operators_line, max_line_length, num_problems);
     uint64_t total = 0;
 
-#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(4)
+#pragma omp parallel for reduction(+ : total) schedule(static) num_threads(6)
     for (size_t problem_idx = 0; problem_idx < num_problems; ++problem_idx) {
       size_t const operator_offset = operator_offsets[problem_idx];
       size_t const num_numbers = operator_offsets[problem_idx + 1] - operator_offset - 1;

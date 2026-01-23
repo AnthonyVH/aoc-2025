@@ -9,9 +9,11 @@ I set myself a few goals to keep things interesting/challenging:
   - [x] Solve all problems in under 12 ms total.
   - [x] Solve all problems in under 1 ms each.
   - [x] Solve all of a day's problems in under 1 ms combined.
-  - [ ] Solve all problems in under 1 ms combined.
+  - [x] Solve all problems in under 1 ms combined.
 
-Clearly the main goal was: make things as fast as possible. Unfortunately I didn't manage the "everything in under 1 ms" challenge. I got very close though, with a combined runtime of 1.10 ms for all problems.
+Clearly the main goal was: make things as fast as possible. The total runtime is 897 μs :tada:.
+
+I'm sure there's room for improvement in many places, but since I reached all my goals, and already spend _way_ too much time on this, this will have to do for now.
 
 > [!NOTE]
 > None of the implementations are tuned to my inputs. I.e. any input conforming to what is given as an example on the Advent of Code's website should work. Of course I can't test that, since I don't have access to other input files.
@@ -25,8 +27,11 @@ The runtimes below were measured using [Google Benchmark](https://github.com/goo
 - Ubuntu 24.04 LTS
 - GCC 14.2.0
 - Executed with `nice --adjustment=-10`
+- Using [`mimalloc 2.1.2`](https://github.com/microsoft/mimalloc) instead of `malloc`
 
-Compilation was done in CMake's `Release` mode, with profile-guided optimization and link-time optimization.
+Compilation was done in CMake's `Release` mode, with link-time optimization (but profile-guided optimization disabled, because it actually resulted in slower runtimes).
+
+The runtimes were measured for each day individually. GCC clearly had an easier time optimizing multiple small binaries instead of a single big one that computed the solutions for all days.
 
 > [!IMPORTANT]
 > The measured times include parsing the input text, and solving the problem. They do not include reading the input text from a file or standard input.
@@ -35,31 +40,31 @@ Compilation was done in CMake's `Release` mode, with profile-guided optimization
 ╭────────────────────────────────────────────────────────────╮
 │ Benchmark                Time             CPU   Iterations │
 ╰────────────────────────────────────────────────────────────╯
-  day 01 - part 1       14.1 us         14.1 us        49014
-  day 01 - part 2       17.9 us         17.9 us        39083
-  day 02 - part 1      0.600 us        0.600 us      1162240
-  day 02 - part 2       1.11 us         1.11 us       628806
-  day 03 - part 1       2.02 us         2.02 us       251657
-  day 03 - part 2       4.17 us         4.17 us       173261
-  day 04 - part 1       2.27 us         2.27 us       308822
-  day 04 - part 2        104 us          103 us         6749
-  day 05 - part 1       14.5 us         14.5 us        48263
-  day 05 - part 2       4.92 us         4.92 us       142410
-  day 06 - part 1       5.49 us         5.49 us       124417
-  day 06 - part 2       5.78 us         5.78 us       119230
-  day 07 - part 1      0.861 us        0.861 us       815084
-  day 07 - part 2       5.40 us         5.39 us       129339
-  day 08 - part 1        278 us          277 us         2527
-  day 08 - part 2        175 us          175 us         4004
-  day 09 - part 1       5.77 us         5.77 us       120859
-  day 09 - part 2       84.9 us         84.7 us         8255
-  day 10 - part 1       73.1 us         73.0 us         9579
-  day 10 - part 2        274 us          274 us         2564
-  day 11 - part 1       5.35 us         5.34 us       130514
-  day 11 - part 2       10.3 us         10.3 us        67973
-  day 12 - part 1       5.73 us         5.73 us       121481
-  ──────────────────────────────────────────────────────────
-  Total                 1095 us         1093 us
+  day 01 - part 1       14.2 us         14.2 us        48453
+  day 01 - part 2       17.8 us         17.8 us        39272
+  day 02 - part 1      0.625 us        0.625 us      1072479
+  day 02 - part 2       1.12 us         1.12 us       626535
+  day 03 - part 1       1.92 us         1.92 us       365210
+  day 03 - part 2       4.80 us         4.80 us       145468
+  day 04 - part 1       1.85 us         1.85 us       375385
+  day 04 - part 2       90.9 us         90.8 us         7730
+  day 05 - part 1       15.3 us         15.3 us        43774
+  day 05 - part 2       3.29 us         3.29 us       212310
+  day 06 - part 1       5.22 us         5.22 us       132612
+  day 06 - part 2       5.29 us         5.28 us       132633
+  day 07 - part 1      0.754 us        0.753 us       898532
+  day 07 - part 2       7.31 us         7.31 us        96019
+  day 08 - part 1        262 us          262 us         2662
+  day 08 - part 2        174 us          174 us         4020
+  day 09 - part 1       5.49 us         5.48 us       121090
+  day 09 - part 2       52.3 us         52.3 us        13392
+  day 10 - part 1       19.2 us         19.2 us        36649
+  day 10 - part 2        193 us          193 us         3614
+  day 11 - part 1       5.44 us         5.42 us       121944
+  day 11 - part 2       9.77 us         9.77 us        70804
+  day 12 - part 1       5.59 us         5.59 us       124677
+───────────────────────────────────────────────────────────────
+  Total                  897 us          897 us
 ```
 
 ## :hammer: Building
